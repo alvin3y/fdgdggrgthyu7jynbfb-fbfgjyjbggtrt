@@ -1,4 +1,4 @@
-name: Native VNC Stream (noVNC)
+name: Native macOS VNC Stream
 
 on: 
   workflow_dispatch:
@@ -11,23 +11,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. Setup Python (Fixes the "externally managed environment" error)
+      # Fix for "externally managed environment" error
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # 2. Install Dependencies
-      - name: Install Tools
+      - name: Install Dependencies
         run: |
-          # Install websockify in the safe python environment
           pip install websockify
-          
-          # Install Cloudflare Tunnel
           brew install cloudflared
 
-      # 3. Download noVNC Web Client
-      # This provides the HTML/JS viewer so you don't just see a white page
       - name: Setup noVNC
         run: |
           git clone https://github.com/novnc/noVNC.git
@@ -36,37 +30,43 @@ jobs:
           ln -s vnc.html index.html
           cd ..
 
-      # 4. Enable Native macOS Screen Sharing
-      - name: Enable macOS VNC Server
+      # --- THE AUTOMATED FIX ---
+      - name: Enable VNC & System Settings
         run: |
-          echo "Enabling Screen Sharing..."
+          # 1. Set System Password (Crucial for Auth)
+          sudo dscl . -passwd /Users/runner password
+
+          # 2. Disable Screen Saver/Lock
+          defaults write com.apple.screensaver idleTime 0
+          sudo defaults write /Library/Preferences/com.apple.screensaver loginWindowIdleTime 0
+          defaults write com.apple.screensaver askForPassword -int 0
+
+          # 3. Enable Native VNC
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
+            -allowAccessFor -allUsers \
+            -privs -all \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw password \
-            -restart -agent -privs -all
+            -restart -agent -console
+          
+          echo "VNC Enabled."
 
-      # 5. Start websockify
-      # Bridges VNC (5900) to WebSocket (6080) and serves the noVNC folder
-      - name: Start Websockify
+      - name: Start Websockify & Tunnel
         run: |
-          # Use 'python -m websockify' to ensure we use the installed module
+          # Run websockify in background
           python -m websockify --web=./noVNC 6080 localhost:5900 &
-          echo "Websockify running on port 6080"
-
-      # 6. Expose to Internet via Cloudflare Tunnel
-      - name: Start Tunnel & Stream
-        run: |
-          echo "Starting Cloudflare Tunnel..."
+          
+          # Run Cloudflare Tunnel
           cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
           
-          # Wait for the URL to be generated
+          # Wait for URL
           sleep 10
           TUNNEL_URL=$(grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1)
           
-          echo "--------------------------------------------------------"
-          echo "🔥 DESKTOP LIVE AT: $TUNNEL_URL/index.html?password=password&autoconnect=true"
-          echo "--------------------------------------------------------"
+          echo "=========================================================="
+          echo "🔴 ACCESS YOUR MAC HERE: $TUNNEL_URL/index.html?password=password&autoconnect=true"
+          echo "=========================================================="
           
-          # Keep the job alive
+          # Keep alive
           while true; do sleep 60; done
