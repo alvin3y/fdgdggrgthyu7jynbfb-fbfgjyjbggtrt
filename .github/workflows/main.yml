@@ -12,27 +12,28 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install System Dependencies
-        run: |
-          brew install ffmpeg pkg-config opus libvpx
-          brew install cliclick 
+        # Only install what is strictly necessary. ffmpeg includes dependencies.
+        run: brew install ffmpeg pkg-config
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
+          cache: 'pip' # Caches dependencies to speed up future runs
 
       - name: Install Python Libraries
         run: |
           pip install aiortc aiohttp websockets pynput av numpy pyobjc-framework-Quartz
 
-      - name: Create WebRTC Host Script
+      - name: Create Optimized Host Script
         run: |
           cat << 'EOF' > host.py
           import asyncio
           import json
           import ssl
           import websockets
-          import logging
+          import av
+          import time
           from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCIceServer, RTCConfiguration
           from aiortc.contrib.media import MediaPlayer
           from pynput.mouse import Button, Controller as MouseController
@@ -40,7 +41,10 @@ jobs:
 
           # --- CONFIGURATION ---
           WS_URL = "wss://alvin3y1-forward.hf.space/macos"
-          
+          TARGET_WIDTH = 1280
+          TARGET_HEIGHT = 720
+          TARGET_FPS = 20
+
           # Hardwired credentials
           ICE_SERVERS = [
               RTCIceServer(
@@ -56,39 +60,48 @@ jobs:
           # Get Screen Resolution
           import Quartz
           main_display_id = Quartz.CGMainDisplayID()
-          screen_width = Quartz.CGDisplayPixelsWide(main_display_id)
-          screen_height = Quartz.CGDisplayPixelsHigh(main_display_id)
+          real_width = Quartz.CGDisplayPixelsWide(main_display_id)
+          real_height = Quartz.CGDisplayPixelsHigh(main_display_id)
           
-          print(f"Server Screen Resolution: {screen_width}x{screen_height}")
+          print(f"Native Resolution: {real_width}x{real_height} -> Scaling to {TARGET_WIDTH}x{TARGET_HEIGHT}")
+
+          # --- VIDEO TRANSFORM TRACK (THE SPEEDUP) ---
+          class TransformTrack(VideoStreamTrack):
+              """
+              Downscales and converts frames to YUV420P before encoding.
+              This saves massive CPU time and bandwidth.
+              """
+              kind = "video"
+
+              def __init__(self, track):
+                  super().__init__()
+                  self.track = track
+
+              async def recv(self):
+                  frame = await self.track.recv()
+                  
+                  # Reformat: Scale down and convert to yuv420p (native for H.264)
+                  # This prevents the encoder from having to do resize+convert
+                  new_frame = frame.reformat(
+                      width=TARGET_WIDTH,
+                      height=TARGET_HEIGHT,
+                      format="yuv420p",
+                      interpolation="fast_bilinear"
+                  )
+                  
+                  # Rebuild pts to ensure smooth playback
+                  new_frame.pts = frame.pts
+                  new_frame.time_base = frame.time_base
+                  return new_frame
 
           # --- INPUT MAPPING ---
-          # Removed 'Insert' as it causes AttributeError on macOS
           KEY_MAP = {
-              'space': Key.space,
-              'Return': Key.enter,
-              'BackSpace': Key.backspace,
-              'Tab': Key.tab,
-              'Escape': Key.esc,
-              'Control_L': Key.ctrl_l,
-              'Control_R': Key.ctrl_r,
-              'Shift_L': Key.shift,
-              'Shift_R': Key.shift_r,
-              'Alt_L': Key.alt,
-              'Alt_R': Key.alt_r,
-              'Super_L': Key.cmd,
-              'cmd': Key.cmd,
-              'Up': Key.up,
-              'Down': Key.down,
-              'Left': Key.left,
-              'Right': Key.right,
-              'Home': Key.home,
-              'End': Key.end,
-              'Page_Up': Key.page_up,
-              'Page_Down': Key.page_down,
-              'Delete': Key.delete,
-              'F1': Key.f1, 'F2': Key.f2, 'F3': Key.f3, 'F4': Key.f4,
-              'F5': Key.f5, 'F6': Key.f6, 'F7': Key.f7, 'F8': Key.f8, 
-              'F9': Key.f9, 'F10': Key.f10, 'F11': Key.f11, 'F12': Key.f12
+              'space': Key.space, 'Return': Key.enter, 'BackSpace': Key.backspace,
+              'Tab': Key.tab, 'Escape': Key.esc, 'Control_L': Key.ctrl_l,
+              'Control_R': Key.ctrl_r, 'Shift_L': Key.shift, 'Shift_R': Key.shift_r,
+              'Alt_L': Key.alt, 'Alt_R': Key.alt_r, 'Super_L': Key.cmd,
+              'cmd': Key.cmd, 'Up': Key.up, 'Down': Key.down,
+              'Left': Key.left, 'Right': Key.right, 'Delete': Key.delete
           }
 
           async def handle_input(channel):
@@ -99,8 +112,9 @@ jobs:
                       t = data.get('type')
 
                       if t == 'mousemove':
-                          x = int(data['x'] * screen_width)
-                          y = int(data['y'] * screen_height)
+                          # Map 0-1 coordinates back to native resolution
+                          x = int(data['x'] * real_width)
+                          y = int(data['y'] * real_height)
                           mouse.position = (x, y)
                       
                       elif t == 'mousedown':
@@ -116,27 +130,20 @@ jobs:
                           mouse.release(btn)
                       
                       elif t == 'wheel':
-                          dx = data.get('deltaX', 0)
-                          dy = data.get('deltaY', 0)
-                          mouse.scroll(-dx * 0.1, -dy * 0.1)
+                          mouse.scroll(-data.get('deltaX', 0)*0.1, -data.get('deltaY', 0)*0.1)
 
                       elif t == 'keydown':
                           k = data['key']
-                          if k in KEY_MAP:
-                              keyboard.press(KEY_MAP[k])
-                          elif len(k) == 1:
-                              # Handle simple characters
-                              keyboard.press(k)
+                          if k in KEY_MAP: keyboard.press(KEY_MAP[k])
+                          elif len(k) == 1: keyboard.press(k)
                       
                       elif t == 'keyup':
                           k = data['key']
-                          if k in KEY_MAP:
-                              keyboard.release(KEY_MAP[k])
-                          elif len(k) == 1:
-                              keyboard.release(k)
+                          if k in KEY_MAP: keyboard.release(KEY_MAP[k])
+                          elif len(k) == 1: keyboard.release(k)
 
                   except Exception as e:
-                      print(f"Input Error: {e}")
+                      pass # Suppress input errors for speed
 
           async def run():
               print(f"Connecting to signaling server: {WS_URL}")
@@ -146,30 +153,30 @@ jobs:
               ssl_context.verify_mode = ssl.CERT_NONE
               
               async with websockets.connect(WS_URL, ssl=ssl_context) as ws:
-                  print("Connected to WebSocket. Waiting for 'start' command...")
-                  
+                  print("Connected. Waiting for start...")
                   pc = None
                   
                   while True:
                       msg = await ws.recv()
-                      # print(f"Received: {msg[:50]}...")
                       
                       if msg == "start":
-                          print("Start command received! Initiating WebRTC...")
-                          
+                          print("Starting Stream...")
                           config = RTCConfiguration(iceServers=ICE_SERVERS)
                           pc = RTCPeerConnection(config)
                           
-                          # Stream Desktop 0 using AVFoundation
-                          player = MediaPlayer("0", format="avfoundation", options={
-                              "framerate": "30",
-                              "video_size": f"{screen_width}x{screen_height}", 
+                          # Capture settings: Request raw input, we handle scaling in TransformTrack
+                          options = {
+                              "framerate": str(TARGET_FPS), 
                               "pixel_format": "uyvy422",
                               "capture_cursor": "1",
                               "capture_mouse_clicks": "1"
-                          })
+                          }
                           
-                          pc.addTrack(player.video)
+                          # Open Desktop Stream
+                          media_player = MediaPlayer("0", format="avfoundation", options=options)
+                          
+                          # Wrap video track in our resizing transformer
+                          pc.addTrack(TransformTrack(media_player.video))
                           
                           dc = pc.createDataChannel("input")
                           await handle_input(dc)
@@ -186,21 +193,19 @@ jobs:
                               "sdp": pc.localDescription.sdp
                           }
                           await ws.send(json.dumps(payload))
-                          print("Offer sent.")
 
                       else:
                           try:
                               data = json.loads(msg)
                               if data.get("type") == "answer":
-                                  print("Received Answer. Setting Remote Description...")
                                   desc = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
                                   await pc.setRemoteDescription(desc)
                               elif data.get("candidate"):
-                                  pass
-                          except json.JSONDecodeError:
+                                  pass # ICE candidates handling if needed
+                          except:
                               pass
                       
-                      await asyncio.sleep(0.1)
+                      await asyncio.sleep(0.01) # Reduced sleep for responsiveness
 
           if __name__ == "__main__":
               asyncio.run(run())
