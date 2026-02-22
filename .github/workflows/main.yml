@@ -1,4 +1,4 @@
-name: Native-Speed WebRTC
+name: Native WebRTC Stream
 
 on: 
   workflow_dispatch:
@@ -7,141 +7,196 @@ jobs:
   native-stream:
     runs-on: macos-latest
     
+    env:
+      # Ensure we link against Homebrew's FFmpeg, not a limited Python wheel
+      PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig"
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Native Tools (GStreamer)
+      - name: Install System Dependencies
+        # Installs FFmpeg with AVFoundation support
         run: |
-          brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav pygobject3 pkg-config
+          brew install ffmpeg pkg-config opus libvpx
+          brew install cliclick
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Install Python Wrappers
-        run: pip install websockets pynput pycairo PyGObject
+      - name: Install Python Libraries
+        # We force 'av' to build from source so it uses the brew-installed FFmpeg 
+        # (which supports native screen capture). The binary wheel often lacks this.
+        run: |
+          pip install --upgrade pip
+          pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz
+          pip install av --no-binary av
 
-      - name: Create Native Pipeline Script
+      - name: Create Native Host Script
         run: |
           cat << 'EOF' > host.py
-          import sys
-          import json
           import asyncio
-          import websockets
+          import json
           import ssl
-          import gi
-          
-          gi.require_version('Gst', '1.0')
-          gi.require_version('GstWebRTC', '1.0')
-          gi.require_version('GstSdp', '1.0')
-          from gi.repository import Gst, GstWebRTC, GstSdp
-
+          import websockets
+          import logging
+          from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCIceServer, RTCConfiguration
+          from aiortc.contrib.media import MediaPlayer
           from pynput.mouse import Button, Controller as MouseController
           from pynput.keyboard import Key, Controller as KeyboardController
+          import Quartz # For screen resolution
 
-          Gst.init(None)
-
+          # --- CONFIGURATION ---
           WS_URL = "wss://alvin3y1-forward.hf.space/macos"
-
-          # --- THE NATIVE PIPELINE ---
-          # 1. avfvideosrc: Reads directly from macOS Framebuffer (Kernel level)
-          # 2. videoscale: Downscales in C (very fast)
-          # 3. x264enc: Compresses video using C library (not Python)
-          #    tune=zerolatency: SENDS DATA IMMEDIATELY, DOES NOT BUFFER
-          PIPELINE_DESC = """
-          webrtcbin name=sendrecv bundle-policy=max-bundle stun-server=stun://stun.l.google.com:19302
-          avfvideosrc capture-cursor=true capture-mouse-clicks=true
-           ! video/x-raw,framerate=30/1
-           ! videoscale ! video/x-raw,width=1280,height=720
-           ! videoconvert
-           ! x264enc tune=zerolatency speed-preset=ultrafast bitrate=2000 key-int-max=30
-           ! rtph264pay config-interval=-1 aggregate-mode=zero-latency
-           ! application/x-rtp,media=video,encoding-name=H264,payload=96
-           ! sendrecv.
-          """
+          
+          ICE_SERVERS = [
+              RTCIceServer(
+                  urls=["turns:turn.cloudflare.com:443?transport=tcp", "turn:turn.cloudflare.com:3478?transport=udp"],
+                  username="g08abe68c81a07f098bb5f0914549bb32440e5aad0b216c7fba2b61e76fd62c6",
+                  credential="aed1a10dd10eba9401ad9d99e5c66036d8a970eab5ba8e6dc9845ab57c771a7d"
+              )
+          ]
 
           mouse = MouseController()
           keyboard = KeyboardController()
-          
-          # Simplified Input Map
+
+          # --- RESOLUTION DETECTION ---
+          main_display_id = Quartz.CGMainDisplayID()
+          screen_width = Quartz.CGDisplayPixelsWide(main_display_id)
+          screen_height = Quartz.CGDisplayPixelsHigh(main_display_id)
+          print(f"Native Resolution: {screen_width}x{screen_height}")
+
+          # --- KEY MAPPING ---
           KEY_MAP = {
               'space': Key.space, 'Return': Key.enter, 'BackSpace': Key.backspace,
-              'Shift_L': Key.shift, 'Control_L': Key.ctrl_l, 'cmd': Key.cmd
+              'Tab': Key.tab, 'Escape': Key.esc,
+              'Control_L': Key.ctrl_l, 'Control_R': Key.ctrl_r,
+              'Shift_L': Key.shift, 'Shift_R': Key.shift_r,
+              'Alt_L': Key.alt, 'Alt_R': Key.alt_r,
+              'Super_L': Key.cmd, 'cmd': Key.cmd,
+              'Up': Key.up, 'Down': Key.down, 'Left': Key.left, 'Right': Key.right,
+              'Home': Key.home, 'End': Key.end, 'Page_Up': Key.page_up, 'Page_Down': Key.page_down,
+              'Delete': Key.delete,
+              'F1': Key.f1, 'F2': Key.f2, 'F3': Key.f3, 'F4': Key.f4,
+              'F5': Key.f5, 'F6': Key.f6, 'F7': Key.f7, 'F8': Key.f8, 
+              'F9': Key.f9, 'F10': Key.f10, 'F11': Key.f11, 'F12': Key.f12
           }
 
-          class WebRTCClient:
-              def __init__(self):
-                  self.conn = None
-                  self.pipe = Gst.parse_launch(PIPELINE_DESC)
-                  self.webrtc = self.pipe.get_by_name('sendrecv')
-                  self.ws = None
-                  self.loop = asyncio.new_event_loop()
+          async def handle_input(channel):
+              @channel.on("message")
+              def on_message(message):
+                  try:
+                      data = json.loads(message)
+                      t = data.get('type')
 
-                  self.webrtc.connect('on-negotiation-needed', self.on_negotiation_needed)
-                  self.webrtc.connect('on-ice-candidate', self.on_ice_candidate)
-
-              def on_negotiation_needed(self, element):
-                  promise = Gst.Promise.new_with_change_func(self.on_offer_created, element, None)
-                  element.emit('create-offer', None, promise)
-
-              def on_offer_created(self, promise, element, _):
-                  reply = promise.get_reply()
-                  offer = reply.get_value('offer')
-                  promise = Gst.Promise.new()
-                  element.emit('set-local-description', offer, promise)
-                  
-                  msg = {'type': 'offer', 'sdp': offer.sdp.as_text()}
-                  asyncio.run_coroutine_threadsafe(self.ws.send(json.dumps(msg)), self.loop)
-
-              def on_ice_candidate(self, element, mlineindex, candidate):
-                  pass # Simplified for single-stream
-
-              async def listen(self):
-                  async with websockets.connect(WS_URL, ssl=ssl._create_unverified_context()) as ws:
-                      self.ws = ws
-                      print("Connected. Waiting for start...")
+                      if t == 'mousemove':
+                          x = int(data['x'] * screen_width)
+                          y = int(data['y'] * screen_height)
+                          mouse.position = (x, y)
                       
-                      while True:
-                          msg = await ws.recv()
-                          if msg == "start":
-                              print("Starting Native Stream...")
-                              self.pipe.set_state(Gst.State.PLAYING)
-                          else:
-                              try:
-                                  data = json.loads(msg)
-                                  t = data.get('type')
-                                  
-                                  if t == 'answer':
-                                      res, sdpmsg = GstSdp.SDPMessage.new()
-                                      GstSdp.sdp_message_parse_buffer(bytes(data['sdp'], 'utf-8'), sdpmsg)
-                                      answer = GstWebRTC.WebRTCSessionDescription.new(GstWebRTC.WebRTCSDPType.ANSWER, sdpmsg)
-                                      promise = Gst.Promise.new()
-                                      self.webrtc.emit('set-remote-description', answer, promise)
-                                  
-                                  # --- INPUT HANDLING ---
-                                  elif t == 'mousemove':
-                                      pass # Add scaling logic if needed
-                                  elif t == 'mousedown':
-                                      mouse.press(Button.left)
-                                  elif t == 'mouseup':
-                                      mouse.release(Button.left)
-                                  elif t == 'keydown':
-                                      k = data['key']
-                                      if k in KEY_MAP: keyboard.press(KEY_MAP[k])
-                                      else: keyboard.press(k)
-                                  elif t == 'keyup':
-                                      k = data['key']
-                                      if k in KEY_MAP: keyboard.release(KEY_MAP[k])
-                                      else: keyboard.release(k)
-                              except Exception as e:
-                                  print(e)
+                      elif t == 'mousedown':
+                          btn = Button.left
+                          if data['button'] == 1: btn = Button.middle
+                          elif data['button'] == 2: btn = Button.right
+                          mouse.press(btn)
+
+                      elif t == 'mouseup':
+                          btn = Button.left
+                          if data['button'] == 1: btn = Button.middle
+                          elif data['button'] == 2: btn = Button.right
+                          mouse.release(btn)
+                      
+                      elif t == 'wheel':
+                          dx = data.get('deltaX', 0)
+                          dy = data.get('deltaY', 0)
+                          mouse.scroll(-dx * 0.1, -dy * 0.1)
+
+                      elif t == 'keydown':
+                          k = data['key']
+                          if k in KEY_MAP: keyboard.press(KEY_MAP[k])
+                          elif len(k) == 1: keyboard.press(k)
+                      
+                      elif t == 'keyup':
+                          k = data['key']
+                          if k in KEY_MAP: keyboard.release(KEY_MAP[k])
+                          elif len(k) == 1: keyboard.release(k)
+
+                  except Exception as e:
+                      print(f"Input Error: {e}")
+
+          async def run():
+              print(f"Connecting to: {WS_URL}")
+              
+              ssl_context = ssl.create_default_context()
+              ssl_context.check_hostname = False
+              ssl_context.verify_mode = ssl.CERT_NONE
+              
+              async with websockets.connect(WS_URL, ssl=ssl_context) as ws:
+                  print("Connected. Waiting for 'start'...")
+                  
+                  pc = None
+                  
+                  while True:
+                      msg = await ws.recv()
+                      
+                      if msg == "start":
+                          print("Start trigger received.")
+                          
+                          config = RTCConfiguration(iceServers=ICE_SERVERS)
+                          pc = RTCPeerConnection(config)
+                          
+                          # --- NATIVE STREAMING SETUP ---
+                          # We use avfoundation via FFmpeg
+                          # "0" is the main screen ID
+                          # "pixel_format": "uyvy422" is the raw mac format
+                          try:
+                              player = MediaPlayer("0", format="avfoundation", options={
+                                  "framerate": "30",
+                                  "video_size": f"{screen_width}x{screen_height}", 
+                                  "pixel_format": "uyvy422",
+                                  "probesize": "32",
+                                  "analyzeduration": "0",
+                                  "capture_cursor": "1",
+                                  "capture_mouse_clicks": "1"
+                              })
+                              pc.addTrack(player.video)
+                          except Exception as e:
+                              print(f"Media Error: {e}")
+                              return
+
+                          dc = pc.createDataChannel("input")
+                          await handle_input(dc)
+
+                          @pc.on("iceconnectionstatechange")
+                          async def on_ice_state_change():
+                              print(f"ICE State: {pc.iceConnectionState}")
+
+                          offer = await pc.createOffer()
+                          await pc.setLocalDescription(offer)
+                          
+                          await ws.send(json.dumps({
+                              "type": pc.localDescription.type,
+                              "sdp": pc.localDescription.sdp
+                          }))
+                          print("Offer sent.")
+
+                      else:
+                          try:
+                              data = json.loads(msg)
+                              if data.get("type") == "answer":
+                                  print("Received Answer.")
+                                  desc = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
+                                  await pc.setRemoteDescription(desc)
+                          except:
+                              pass
+                      
+                      await asyncio.sleep(0.01)
 
           if __name__ == "__main__":
-              c = WebRTCClient()
-              c.loop.run_until_complete(c.listen())
+              asyncio.run(run())
           EOF
 
-      - name: Run
+      - name: Start Host
         run: python host.py
