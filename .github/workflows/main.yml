@@ -14,15 +14,16 @@ jobs:
       - name: Install FFmpeg
         run: brew install ffmpeg
 
-      - name: Open App (So the screen isn't empty)
+      - name: List Available Devices (Debug)
+        run: ffmpeg -f avfoundation -list_devices true -i "" || true
+
+      - name: Open App
         run: open -a Calculator
 
       - name: Start 30fps Screen Stream
         run: |
-          # We use index "1" here as it's common for the virtual display on macos-latest
-          # If it fails, try changing "1" to "0" in the -i argument below.
-          
-          ffmpeg -f avfoundation -capture_cursor 1 -i "1" \
+          # Changed -i "1" to -i "0" based on your error log
+          ffmpeg -f avfoundation -capture_cursor 1 -i "0" \
             -vf "scale=1280:-1" -r 30 \
             -c:v libx264 -preset ultrafast -tune zerolatency \
             -pix_fmt yuv420p -b:v 2500k \
