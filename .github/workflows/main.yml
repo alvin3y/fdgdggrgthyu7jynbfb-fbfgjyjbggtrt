@@ -1,4 +1,4 @@
-name: Safari Automation Loop
+name: High-Speed Optimized Stream
 
 on: 
   workflow_dispatch:
@@ -14,44 +14,40 @@ jobs:
       - name: Install Tools
         run: brew install ffmpeg cliclick
 
-      - name: Start Background Stream
+      - name: Start Ultra-Fast Hardware Stream
         run: |
-          # Start the stream in the background
-          ffmpeg -f avfoundation -capture_cursor 1 -i "0" \
-            -vf "scale=1280:-1" -r 30 \
-            -c:v libx264 -preset ultrafast -tune zerolatency \
-            -pix_fmt yuv420p -b:v 2500k \
+          # 1. -probesize & -analyzeduration: Reduces startup lag by skipping stream analysis.
+          # 2. -c:v h264_videotoolbox: Uses Apple Hardware Encoding (fastest possible on Mac).
+          # 3. -realtime 1: Forces the engine to prioritize speed over quality.
+          # 4. -g 60: Sets keyframes for Twitch (2-second intervals at 30fps).
+          
+          ffmpeg -hide_banner -loglevel error \
+            -probesize 32 -analyzeduration 0 \
+            -f avfoundation -capture_cursor 1 -i "0" \
+            -vf "scale=1280:-1,format=yuv420p" -r 30 \
+            -c:v h264_videotoolbox -realtime 1 -allow_sw 1 \
+            -b:v 2500k -maxrate 2500k -bufsize 1000k \
+            -g 60 -tune zerolatency -pix_fmt yuv420p \
             -f flv "rtmp://iad05.contribute.live-video.net/app/live_1448220741_99LXQ4TGollmTzBeQLQmSEf7UCby3B" &
           
-          sleep 10 # Give the stream time to connect
+          sleep 5 # Reduced wait time because hardware encoding starts faster
 
-      - name: Infinite Safari Loop
+      - name: Smooth Safari Loop
         run: |
-          echo "Starting the loop... Press 'Cancel' in GitHub Actions to stop."
-          
           while true; do
-            echo "--- New Cycle Starting ---"
-            
-            # 1. Open Safari
             open -a Safari
-            sleep 4 # Wait for it to launch
+            sleep 3
             
-            # 2. Focus the address bar (Cmd+L) and type google
-            # This is more reliable than clicking a specific pixel for the search bar
+            # Use Cmd+L (Address bar) - it's faster than moving the mouse there
             osascript -e 'tell application "System Events" to keystroke "l" using command down'
-            sleep 1
-            osascript -e 'tell application "System Events" to keystroke "google.com"'
-            osascript -e 'tell application "System Events" to key code 36' # Press Enter
+            cliclick t:"google.com"
+            cliclick kp:return
             
-            echo "Waiting 5 seconds for Google to load..."
             sleep 5
             
-            # 3. Move mouse to the Red Close Button and click
-            # On a fresh Safari window, the red button is roughly at 25, 55
-            echo "Closing Safari with the mouse..."
-            cliclick m:25,55    # Hover over red button
-            sleep 1
-            cliclick c:25,55    # Click it
+            # Smooth slide to close (easing 30 is faster but still looks smooth)
+            cliclick -e 30 m:25,55
+            cliclick c:25,55
             
-            sleep 2 # Small pause before starting over
+            sleep 2
           done
