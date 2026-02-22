@@ -14,7 +14,6 @@ jobs:
       - name: Install System Dependencies
         run: |
           brew install ffmpeg pkg-config opus libvpx
-          # We keep cliclick just in case, though pynput is primary
           brew install cliclick 
 
       - name: Set up Python
@@ -24,7 +23,7 @@ jobs:
 
       - name: Install Python Libraries
         run: |
-          pip install aiortc aiohttp websockets pynput av numpy
+          pip install aiortc aiohttp websockets pynput av numpy pyobjc-framework-Quartz
 
       - name: Create WebRTC Host Script
         run: |
@@ -54,7 +53,7 @@ jobs:
           mouse = MouseController()
           keyboard = KeyboardController()
 
-          # Get Screen Resolution for coordinate mapping
+          # Get Screen Resolution
           import Quartz
           main_display_id = Quartz.CGMainDisplayID()
           screen_width = Quartz.CGDisplayPixelsWide(main_display_id)
@@ -63,6 +62,7 @@ jobs:
           print(f"Server Screen Resolution: {screen_width}x{screen_height}")
 
           # --- INPUT MAPPING ---
+          # Removed 'Insert' as it causes AttributeError on macOS
           KEY_MAP = {
               'space': Key.space,
               'Return': Key.enter,
@@ -86,7 +86,6 @@ jobs:
               'Page_Up': Key.page_up,
               'Page_Down': Key.page_down,
               'Delete': Key.delete,
-              'Insert': Key.insert,
               'F1': Key.f1, 'F2': Key.f2, 'F3': Key.f3, 'F4': Key.f4,
               'F5': Key.f5, 'F6': Key.f6, 'F7': Key.f7, 'F8': Key.f8, 
               'F9': Key.f9, 'F10': Key.f10, 'F11': Key.f11, 'F12': Key.f12
@@ -126,6 +125,7 @@ jobs:
                           if k in KEY_MAP:
                               keyboard.press(KEY_MAP[k])
                           elif len(k) == 1:
+                              # Handle simple characters
                               keyboard.press(k)
                       
                       elif t == 'keyup':
@@ -152,7 +152,7 @@ jobs:
                   
                   while True:
                       msg = await ws.recv()
-                      print(f"Received: {msg[:50]}...")
+                      # print(f"Received: {msg[:50]}...")
                       
                       if msg == "start":
                           print("Start command received! Initiating WebRTC...")
@@ -160,7 +160,7 @@ jobs:
                           config = RTCConfiguration(iceServers=ICE_SERVERS)
                           pc = RTCPeerConnection(config)
                           
-                          # Stream Desktop 0
+                          # Stream Desktop 0 using AVFoundation
                           player = MediaPlayer("0", format="avfoundation", options={
                               "framerate": "30",
                               "video_size": f"{screen_width}x{screen_height}", 
