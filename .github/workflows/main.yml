@@ -1,30 +1,57 @@
-name: Real-Time macOS Screen Stream
+name: Safari Automation Loop
 
 on: 
   workflow_dispatch:
 
 jobs:
-  stream-screen:
+  stream-and-loop:
     runs-on: macos-latest
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install FFmpeg
-        run: brew install ffmpeg
+      - name: Install Tools
+        run: brew install ffmpeg cliclick
 
-      - name: List Available Devices (Debug)
-        run: ffmpeg -f avfoundation -list_devices true -i "" || true
-
-      - name: Open App
-        run: open -a Calculator
-
-      - name: Start 30fps Screen Stream
+      - name: Start Background Stream
         run: |
-          # Changed -i "1" to -i "0" based on your error log
+          # Start the stream in the background
           ffmpeg -f avfoundation -capture_cursor 1 -i "0" \
             -vf "scale=1280:-1" -r 30 \
             -c:v libx264 -preset ultrafast -tune zerolatency \
             -pix_fmt yuv420p -b:v 2500k \
-            -f flv "rtmp://iad05.contribute.live-video.net/app/live_1448220741_99LXQ4TGollmTzBeQLQmSEf7UCby3B"
+            -f flv "rtmp://iad05.contribute.live-video.net/app/live_1448220741_99LXQ4TGollmTzBeQLQmSEf7UCby3B" &
+          
+          sleep 10 # Give the stream time to connect
+
+      - name: Infinite Safari Loop
+        run: |
+          echo "Starting the loop... Press 'Cancel' in GitHub Actions to stop."
+          
+          while true; do
+            echo "--- New Cycle Starting ---"
+            
+            # 1. Open Safari
+            open -a Safari
+            sleep 4 # Wait for it to launch
+            
+            # 2. Focus the address bar (Cmd+L) and type google
+            # This is more reliable than clicking a specific pixel for the search bar
+            osascript -e 'tell application "System Events" to keystroke "l" using command down'
+            sleep 1
+            osascript -e 'tell application "System Events" to keystroke "google.com"'
+            osascript -e 'tell application "System Events" to key code 36' # Press Enter
+            
+            echo "Waiting 5 seconds for Google to load..."
+            sleep 5
+            
+            # 3. Move mouse to the Red Close Button and click
+            # On a fresh Safari window, the red button is roughly at 25, 55
+            echo "Closing Safari with the mouse..."
+            cliclick m:25,55    # Hover over red button
+            sleep 1
+            cliclick c:25,55    # Click it
+            
+            sleep 2 # Small pause before starting over
+          done
