@@ -12,35 +12,46 @@ jobs:
         uses: actions/checkout@v4
 
       # 1. Install Dependencies
-      - name: Install Network Tools
+      - name: Install Tools
         run: |
-          brew install websockify
-          # Install Cloudflare Tunnel (fast, secure, free tunneling)
+          # Install Cloudflare Tunnel
           brew install cloudflared
+          # Install websockify via Python
+          pip3 install websockify
 
-      # 2. Enable Native macOS Screen Sharing
+      # 2. Download noVNC Web Client
+      # We need the HTML/JS files to actually render the screen in the browser
+      - name: Setup noVNC
+        run: |
+          git clone https://github.com/novnc/noVNC.git
+          cd noVNC
+          git checkout v1.4.0
+          # Link the VNC standard template to index.html so it loads by default
+          ln -s vnc.html index.html
+          cd ..
+
+      # 3. Enable Native macOS Screen Sharing
       - name: Enable macOS VNC Server
         run: |
           echo "Enabling Screen Sharing..."
-          # Set the password to 'password' (or change as needed)
+          # Set the password to 'password'
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw password \
             -restart -agent -privs -all
 
-      # 3. Start websockify (Bridges VNC Port 5900 -> WebSocket Port 6080)
+      # 4. Start websockify
+      # Bridges VNC (5900) to WebSocket (6080) and serves the noVNC folder as a website
       - name: Start Websockify
         run: |
-          # Run in background (&)
-          websockify 6080 localhost:5900 &
+          # --web points to the folder we just cloned
+          websockify --web=./noVNC 6080 localhost:5900 &
           echo "Websockify running on port 6080"
 
-      # 4. Expose to Internet via Cloudflare Tunnel
+      # 5. Expose to Internet via Cloudflare Tunnel
       - name: Start Tunnel & Stream
         run: |
-          # Use Cloudflare Quick Tunnel to expose port 6080
-          # This will output a standard URL like https://random-name.trycloudflare.com
           echo "Starting Cloudflare Tunnel..."
           cloudflared tunnel --url http://localhost:6080 > tunnel.log 2>&1 &
           
@@ -49,8 +60,8 @@ jobs:
           TUNNEL_URL=$(grep -o 'https://.*\.trycloudflare.com' tunnel.log | head -n 1)
           
           echo "--------------------------------------------------------"
-          echo "🔥 DESKTOP LIVE AT: $TUNNEL_URL/vnc.html?password=password&autoconnect=true"
+          echo "🔥 DESKTOP LIVE AT: $TUNNEL_URL/index.html?password=password&autoconnect=true"
           echo "--------------------------------------------------------"
           
-          # Keep the job alive
+          # Keep the job alive so you can connect
           while true; do sleep 60; done
