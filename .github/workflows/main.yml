@@ -11,45 +11,50 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. Install Dependencies
+      # 1. Setup Python (Fixes the "externally managed environment" error)
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 2. Install Dependencies
       - name: Install Tools
         run: |
+          # Install websockify in the safe python environment
+          pip install websockify
+          
           # Install Cloudflare Tunnel
           brew install cloudflared
-          # Install websockify via Python
-          pip3 install websockify
 
-      # 2. Download noVNC Web Client
-      # We need the HTML/JS files to actually render the screen in the browser
+      # 3. Download noVNC Web Client
+      # This provides the HTML/JS viewer so you don't just see a white page
       - name: Setup noVNC
         run: |
           git clone https://github.com/novnc/noVNC.git
           cd noVNC
           git checkout v1.4.0
-          # Link the VNC standard template to index.html so it loads by default
           ln -s vnc.html index.html
           cd ..
 
-      # 3. Enable Native macOS Screen Sharing
+      # 4. Enable Native macOS Screen Sharing
       - name: Enable macOS VNC Server
         run: |
           echo "Enabling Screen Sharing..."
-          # Set the password to 'password'
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw password \
             -restart -agent -privs -all
 
-      # 4. Start websockify
-      # Bridges VNC (5900) to WebSocket (6080) and serves the noVNC folder as a website
+      # 5. Start websockify
+      # Bridges VNC (5900) to WebSocket (6080) and serves the noVNC folder
       - name: Start Websockify
         run: |
-          # --web points to the folder we just cloned
-          websockify --web=./noVNC 6080 localhost:5900 &
+          # Use 'python -m websockify' to ensure we use the installed module
+          python -m websockify --web=./noVNC 6080 localhost:5900 &
           echo "Websockify running on port 6080"
 
-      # 5. Expose to Internet via Cloudflare Tunnel
+      # 6. Expose to Internet via Cloudflare Tunnel
       - name: Start Tunnel & Stream
         run: |
           echo "Starting Cloudflare Tunnel..."
@@ -63,5 +68,5 @@ jobs:
           echo "🔥 DESKTOP LIVE AT: $TUNNEL_URL/index.html?password=password&autoconnect=true"
           echo "--------------------------------------------------------"
           
-          # Keep the job alive so you can connect
+          # Keep the job alive
           while true; do sleep 60; done
