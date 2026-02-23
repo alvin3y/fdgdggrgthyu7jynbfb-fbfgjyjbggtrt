@@ -14,14 +14,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Dependencies & Create User 'Alvin'
+      - name: Install System Dependencies
         run: |
-          # 1. Install System Dependencies
           brew install ffmpeg pkg-config opus libvpx
           brew install cliclick
           brew install cloudflare/cloudflare/cloudflared
-          
-          # 2. Create user 'Alvin'
+
+      - name: Configure User 'Alvin' & VNC
+        # We create user 'Alvin' so we have credentials to login via VNC.
+        # The password is set to 'alvin2007'.
+        run: |
           echo "Creating user Alvin..."
           sudo dscl . -create /Users/Alvin
           sudo dscl . -create /Users/Alvin UserShell /bin/zsh
@@ -29,72 +31,45 @@ jobs:
           sudo dscl . -create /Users/Alvin UniqueID 503
           sudo dscl . -create /Users/Alvin PrimaryGroupID 20
           sudo dscl . -create /Users/Alvin NFSHomeDirectory /Users/Alvin
-          
-          # 3. Set password to 'alvin2007'
           sudo dscl . -passwd /Users/Alvin "alvin2007"
-          
-          # 4. Grant Administrator Privileges
           sudo dscl . -append /Groups/admin GroupMembership Alvin
-          
-          # 5. Create Home Directory
           sudo createhomedir -c -u Alvin > /dev/null
 
-          # 6. Configure VNC (Screen Sharing)
-          # We set the global VNC password to 'alvin2007'
-          # This allows you to log in via VNC using these credentials
+          # Configure macOS Screen Sharing (VNC)
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
           -activate -configure -access -on \
           -clientopts -setvnclegacy -vnclegacy yes \
           -clientopts -setvncpw -vncpw "alvin2007" \
           -restart -agent -privs -all
 
-      - name: Setup noVNC and Dock Icon
+      - name: Start noVNC & Generate URL
         run: |
-          # 1. Clone noVNC and websockify to the current user's home
+          # 1. Clone noVNC and Websockify
           cd /Users/runner
-          git clone https://github.com/novnc/noVNC.git noVNC
-          git clone https://github.com/novnc/websockify.git websockify
+          git clone https://github.com/novnc/noVNC.git
+          git clone https://github.com/novnc/websockify.git noVNC/utils/websockify
+
+          # 2. Start websockify in the background (Ports: 6080 -> 5900)
+          # We use --web to serve the noVNC html files
+          ./noVNC/utils/websockify/run --web ./noVNC 6080 localhost:5900 > /tmp/novnc.log 2>&1 &
           
-          # 2. Create the shell script that runs when the icon is clicked
-          # It starts websockify (port 6080 -> 5900) and Cloudflared (tunneling 6080)
-          cat << 'EOF' > /Users/runner/start_novnc.sh
-          #!/bin/bash
-          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-          
-          echo "----------------------------------------"
-          echo "Starting noVNC Bridge..."
-          echo "----------------------------------------"
-          # Start websockify in background
-          /Users/runner/websockify/run 6080 localhost:5900 --web=/Users/runner/noVNC > /tmp/novnc.log 2>&1 &
-          
-          sleep 2
-          
-          echo "----------------------------------------"
           echo "Starting Cloudflare Tunnel..."
-          echo ">> COPY THE URL BELOW TO VIEW VNC <<"
-          echo "----------------------------------------"
-          # Start tunnel; the URL will appear in this terminal window
-          cloudflared tunnel --url http://localhost:6080
-          EOF
-          chmod +x /Users/runner/start_novnc.sh
-
-          # 3. Create AppleScript App to launch the shell script in Terminal
-          cat << 'EOF' > /Users/runner/start_novnc.applescript
-          tell application "Terminal"
-              do script "/Users/runner/start_novnc.sh"
-              activate
-          end tell
-          EOF
           
-          # 4. Compile to .app
-          mkdir -p /Applications
-          osacompile -o /Applications/StartNoVNC.app /Users/runner/start_novnc.applescript
-
-          # 5. Add to the Dock (for the current visible user 'runner')
-          defaults write com.apple.dock persistent-apps -array-add "<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>/Applications/StartNoVNC.app</string><key>_CFURLStringType</key><integer>0</integer></dict></dict></dict>"
+          # 3. Start Cloudflared in the background and log output
+          cloudflared tunnel --url http://localhost:6080 > /tmp/tunnel.log 2>&1 &
           
-          # 6. Restart Dock to make the icon appear
-          killall Dock
+          # 4. Wait for the tunnel to register
+          sleep 8
+          
+          # 5. Extract and show the URL
+          echo "========================================================"
+          echo "              VNC STREAM URL (Backup)                   "
+          echo "========================================================"
+          echo ""
+          grep -o 'https://.*\.trycloudflare\.com' /tmp/tunnel.log || cat /tmp/tunnel.log
+          echo ""
+          echo "Use User: Alvin | Pass: alvin2007"
+          echo "========================================================"
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -119,9 +94,10 @@ jobs:
           from aiortc.contrib.media import MediaPlayer
           from pynput.mouse import Button, Controller as MouseController
           from pynput.keyboard import Key, Controller as KeyboardController
-          import Quartz # For screen resolution
+          import Quartz 
 
           # --- CONFIGURATION ---
+          # Ensure this WebSocket URL is active on your HuggingFace/Signaling server
           WS_URL = "wss://alvin3y1-forward.hf.space/macos"
           
           ICE_SERVERS = [
@@ -200,14 +176,14 @@ jobs:
                       print(f"Input Error: {e}")
 
           async def run():
-              print(f"Connecting to: {WS_URL}")
+              print(f"Connecting to Signaling Server: {WS_URL}")
               
               ssl_context = ssl.create_default_context()
               ssl_context.check_hostname = False
               ssl_context.verify_mode = ssl.CERT_NONE
               
               async with websockets.connect(WS_URL, ssl=ssl_context) as ws:
-                  print("Connected. Waiting for 'start'...")
+                  print("Connected. Waiting for 'start' command from client...")
                   
                   pc = None
                   
@@ -215,14 +191,14 @@ jobs:
                       msg = await ws.recv()
                       
                       if msg == "start":
-                          print("Start trigger received.")
+                          print("Start trigger received. Initializing WebRTC...")
                           
                           config = RTCConfiguration(iceServers=ICE_SERVERS)
                           pc = RTCPeerConnection(config)
                           
                           # --- NATIVE STREAMING SETUP ---
-                          # Running as 'runner' ensures we capture the visible Desktop
                           try:
+                              # '0' is usually the default screen on macOS via AVFoundation
                               player = MediaPlayer("0", format="avfoundation", options={
                                   "framerate": "30",
                                   "video_size": f"{screen_width}x{screen_height}", 
@@ -234,7 +210,7 @@ jobs:
                               })
                               pc.addTrack(player.video)
                           except Exception as e:
-                              print(f"Media Error: {e}")
+                              print(f"AVFoundation Error: {e}")
                               return
 
                           dc = pc.createDataChannel("input")
@@ -243,6 +219,8 @@ jobs:
                           @pc.on("iceconnectionstatechange")
                           async def on_ice_state_change():
                               print(f"ICE State: {pc.iceConnectionState}")
+                              if pc.iceConnectionState == "failed":
+                                  print("ICE Connection failed.")
 
                           offer = await pc.createOffer()
                           await pc.setLocalDescription(offer)
@@ -251,13 +229,13 @@ jobs:
                               "type": pc.localDescription.type,
                               "sdp": pc.localDescription.sdp
                           }))
-                          print("Offer sent.")
+                          print("Offer sent to signaling server.")
 
                       else:
                           try:
                               data = json.loads(msg)
                               if data.get("type") == "answer":
-                                  print("Received Answer.")
+                                  print("Received Remote Answer.")
                                   desc = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
                                   await pc.setRemoteDescription(desc)
                           except:
@@ -269,8 +247,6 @@ jobs:
               asyncio.run(run())
           EOF
 
-      - name: Start Host
-        # We run the Python script as the current user (runner)
-        # because this user owns the active WindowServer session.
-        # Capturing as 'Alvin' (background user) would likely result in a black screen.
+      - name: Start Native Host
+        # Runs the Python script to stream the screen via WebRTC
         run: python host.py
