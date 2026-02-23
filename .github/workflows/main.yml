@@ -216,13 +216,17 @@ jobs:
                           pc = RTCPeerConnection(config)
                           
                           w, h = get_screen_size()
-                          print(f"Starting stream at: {w}x{h}")
+                          # REDUCED QUALITY SETTINGS:
+                          # Downscale resolution by half to save CPU
+                          stream_w = w // 2
+                          stream_h = h // 2
+                          print(f"Starting stream at: {stream_w}x{stream_h} (Scaled from {w}x{h})")
 
                           try:
                               # AVFoundation Capture
                               player = MediaPlayer("0", format="avfoundation", options={
-                                  "framerate": "30",
-                                  "video_size": f"{w}x{h}",
+                                  "framerate": "12", # Reduced from 30 to 12
+                                  "video_size": f"{stream_w}x{stream_h}",
                                   "pixel_format": "uyvy422",
                                   "capture_cursor": "0",
                                   "capture_mouse_clicks": "1",
