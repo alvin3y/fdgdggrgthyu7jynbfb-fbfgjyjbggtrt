@@ -14,7 +14,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 1. SETUP PYTHON FIRST (Fixes Websockify startup error)
+      # 1. SETUP PYTHON FIRST
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -23,20 +23,14 @@ jobs:
       # 2. INSTALL DEPENDENCIES
       - name: Install Dependencies
         run: |
-          # System tools
           brew install ffmpeg pkg-config opus libvpx cliclick cloudflare/cloudflare/cloudflared
-          
-          # Python libraries
           pip install --upgrade pip
           pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz av
-          
-          # Websockify needs numpy to run faster/reliably
           pip install numpy
 
       # 3. CONFIGURE VNC (User 'Alvin')
       - name: Configure VNC User & Server
         run: |
-          # Create User Alvin
           sudo dscl . -create /Users/Alvin
           sudo dscl . -create /Users/Alvin UserShell /bin/zsh
           sudo dscl . -create /Users/Alvin RealName "Alvin"
@@ -54,7 +48,7 @@ jobs:
           -clientopts -setvncpw -vncpw "alvin2007" \
           -restart -agent -privs -all
 
-      # 4. START NOVNC (With Port Check)
+      # 4. START NOVNC (Fixed Path Issue)
       - name: Start noVNC & Cloudflare Tunnel
         run: |
           cd /Users/runner
@@ -62,21 +56,21 @@ jobs:
           git clone https://github.com/novnc/websockify.git noVNC/utils/websockify
 
           echo "Starting Websockify..."
-          # We explicitly use the python environment we just set up
-          ./noVNC/utils/websockify/run --web ./noVNC 6080 localhost:5900 > /tmp/novnc.log 2>&1 &
           
-          # WAIT for Port 6080 to be active (Prevents 502 Error)
-          echo "Waiting for Websockify to initialize..."
+          # FIX: Use ABSOLUTE PATH for --web to prevent directory errors
+          ./noVNC/utils/websockify/run --web /Users/runner/noVNC 6080 localhost:5900 > /tmp/novnc.log 2>&1 &
+          
+          # Wait for Websockify to initialize
+          echo "Waiting for Websockify..."
           for i in {1..10}; do
             if lsof -Pi :6080 -sTCP:LISTEN -t >/dev/null; then
               echo "Websockify is UP on port 6080."
               break
             fi
-            echo "Waiting..."
             sleep 2
           done
 
-          # If it still isn't up, show logs and exit
+          # Verify success
           if ! lsof -Pi :6080 -sTCP:LISTEN -t >/dev/null; then
             echo "ERROR: Websockify failed to start."
             cat /tmp/novnc.log
