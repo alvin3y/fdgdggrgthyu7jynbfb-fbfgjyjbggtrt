@@ -1,4 +1,4 @@
-name: Native WebRTC Stream (Auto-Res)
+name: Native WebRTC Stream
 
 on: 
   workflow_dispatch:
@@ -17,10 +17,8 @@ jobs:
       - name: Install System Dependencies
         run: |
           brew install ffmpeg pkg-config opus libvpx
+          brew install cliclick
           brew install displayplacer
-          brew install swift
-          # Grant permissions helper (attempt)
-          tccutil reset ScreenCapture || true
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -42,16 +40,13 @@ jobs:
           import websockets
           import subprocess
           import re
-          import platform
-          from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCIceServer, RTCConfiguration
+          from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCIceServer, RTCConfiguration, RTCRtpSender
           from aiortc.contrib.media import MediaPlayer
           from pynput.mouse import Button, Controller as MouseController
           from pynput.keyboard import Key, Controller as KeyboardController
           import Quartz
 
           WS_URL = "wss://alvin3y1-forward.hf.space/macos"
-          
-          # TURN servers for traversing NATs
           ICE_SERVERS = [
               RTCIceServer(
                   urls=["turns:turn.cloudflare.com:443?transport=tcp", "turn:turn.cloudflare.com:3478?transport=udp"],
@@ -63,44 +58,59 @@ jobs:
           mouse = MouseController()
           keyboard = KeyboardController()
           
-          def get_screen_dimensions():
-              main_id = Quartz.CGMainDisplayID()
-              return Quartz.CGDisplayPixelsWide(main_id), Quartz.CGDisplayPixelsHigh(main_id)
+          def get_screen_size():
+              main_display_id = Quartz.CGMainDisplayID()
+              w = Quartz.CGDisplayPixelsWide(main_display_id)
+              h = Quartz.CGDisplayPixelsHigh(main_display_id)
+              return w, h
 
-          def match_resolution(target_w, target_h):
-              """
-              Parses displayplacer output to find the resolution closest to the client's request.
-              This ensures 'perfect fit' within the capabilities of the host GPU/VM.
-              """
+          def set_system_resolution(target_w, target_h):
               try:
-                  # Get main display ID
-                  out = subprocess.check_output(['displayplacer', 'list']).decode('utf-8')
-                  id_match = re.search(r'Persistent screen id: ([^ \n]+)', out)
-                  if not id_match: return
-                  screen_id = id_match.group(1)
+                  if target_h == 0 or target_w == 0: return False
                   
-                  # Parse available resolutions
-                  resolutions = []
-                  for line in out.split('\n'):
-                      if 'Resolution:' in line:
+                  result = subprocess.run(['displayplacer', 'list'], capture_output=True, text=True)
+                  output = result.stdout
+                  
+                  id_match = re.search(r'Persistent screen id: ([^ \n]+)', output)
+                  if not id_match: return False
+                  screen_id = id_match.group(1)
+
+                  available_res = []
+                  for line in output.split('\n'):
+                      if "Resolution:" in line:
                           parts = line.split(':')[1].strip().split('x')
                           if len(parts) >= 2:
-                              w = int(parts[0])
-                              h_clean = parts[1].split('@')[0].split(' ')[0] # Handle 1920x1080@60Hz
-                              h = int(h_clean)
-                              resolutions.append((w, h))
-                  
-                  if not resolutions: return
+                              try:
+                                  w = int(parts[0])
+                                  h = int(parts[1].split('@')[0].split(' ')[0])
+                                  available_res.append((w, h))
+                              except:
+                                  continue
 
-                  # Find closest resolution (Euclidean distance)
-                  best_res = min(resolutions, key=lambda r: (r[0] - target_w)**2 + (r[1] - target_h)**2)
+                  if not available_res: return False
+                  available_res = list(set(available_res))
+
+                  target_ar = target_w / target_h
+
+                  def resolution_score(res):
+                      w, h = res
+                      current_ar = w / h
+                      ar_diff = abs(current_ar - target_ar)
+                      size_diff = abs(w - target_w)
+                      return (ar_diff, size_diff)
+
+                  available_res.sort(key=resolution_score)
+                  best_w, best_h = available_res[0]
                   
-                  print(f"Client requested: {target_w}x{target_h}. Switching host to closest match: {best_res[0]}x{best_res[1]}")
-                  
-                  # Execute switch
-                  subprocess.run(['displayplacer', f"id:{screen_id}", f"res:{best_res[0]}x{best_res[1]}"], check=True)
+                  current_w, current_h = get_screen_size()
+                  if best_w == current_w and best_h == current_h:
+                      return True
+
+                  subprocess.run(['displayplacer', f"id:{screen_id}", f"res:{best_w}x{best_h}"], check=True)
+                  return True
               except Exception as e:
-                  print(f"Failed to resize screen: {e}")
+                  print(f"Resolution switch failed: {e}")
+                  return False
 
           KEY_MAP = {
               'space': Key.space, 'Return': Key.enter, 'BackSpace': Key.backspace,
@@ -113,121 +123,128 @@ jobs:
               'Home': Key.home, 'End': Key.end, 'Delete': Key.delete
           }
 
+          async def handle_input(channel, pc):
+              @channel.on("message")
+              def on_message(message):
+                  try:
+                      data = json.loads(message)
+                      t = data.get('type')
+                      sw, sh = get_screen_size()
+
+                      if t == 'mousemove':
+                          x = int(data['x'] * sw)
+                          y = int(data['y'] * sh)
+                          mouse.position = (x, y)
+                      elif t == 'mousedown':
+                          btn = Button.left
+                          if data['button'] == 2: btn = Button.right
+                          elif data['button'] == 1: btn = Button.middle
+                          mouse.press(btn)
+                      elif t == 'mouseup':
+                          btn = Button.left
+                          if data['button'] == 2: btn = Button.right
+                          elif data['button'] == 1: btn = Button.middle
+                          mouse.release(btn)
+                      elif t == 'wheel':
+                          mouse.scroll(-data.get('deltaX', 0)*0.1, -data.get('deltaY', 0)*0.1)
+                      elif t == 'keydown':
+                          k = data['key']
+                          if k in KEY_MAP: keyboard.press(KEY_MAP[k])
+                          elif len(k) == 1: keyboard.press(k)
+                      elif t == 'keyup':
+                          k = data['key']
+                          if k in KEY_MAP: keyboard.release(KEY_MAP[k])
+                          elif len(k) == 1: keyboard.release(k)
+                      elif t == 'resize':
+                          w, h = data.get('width'), data.get('height')
+                          set_system_resolution(w, h)
+                  except Exception as e:
+                      pass
+
           async def run():
+              print(f"Connecting to: {WS_URL}")
+              
               ssl_context = ssl.create_default_context()
               ssl_context.check_hostname = False
               ssl_context.verify_mode = ssl.CERT_NONE
               
-              print(f"Connecting to Signaling Server: {WS_URL}")
-              
               async with websockets.connect(WS_URL, ssl=ssl_context) as ws:
-                  print("WebSocket Connected. Waiting for 'start' signal...")
+                  print("Connected. Waiting for 'start'...")
                   
                   pc = None
                   
                   while True:
-                      message = await ws.recv()
+                      msg = await ws.recv()
                       
-                      if message == "start":
-                          print("Received START signal. Initializing PeerConnection...")
+                      if msg == "start":
+                          config = RTCConfiguration(iceServers=ICE_SERVERS)
+                          pc = RTCPeerConnection(config)
                           
-                          pc = RTCPeerConnection(RTCConfiguration(iceServers=ICE_SERVERS))
-                          
-                          # 1. Screen Capture via AVFoundation
-                          # Index "1" is usually the Screen on macOS Actions runners (Index "0" is often missing camera)
-                          # We do NOT specify video_size in options to allow ffmpeg to auto-detect current res
+                          # 1. Get exact screen size
+                          w, h = get_screen_size()
+                          print(f"Starting stream at HIGH RES: {w}x{h}")
+
                           try:
-                              player = MediaPlayer("1", format="avfoundation", options={
+                              # 2. Configure High Quality Capture
+                              # We specifically pass video_size to prevent ffmpeg defaulting to 480p
+                              player = MediaPlayer("0", format="avfoundation", options={
                                   "framerate": "30",
+                                  "video_size": f"{w}x{h}",
                                   "pixel_format": "uyvy422",
                                   "capture_cursor": "1",
                                   "capture_mouse_clicks": "1",
-                                  "probesize": "50M",
+                                  "probesize": "100M",
                                   "analyzeduration": "100M"
                               })
-                              pc.addTrack(player.video)
+                              
+                              # 3. Add Transceiver & Force H.264 / High Bitrate
+                              transceiver = pc.addTransceiver(player.video)
+                              
+                              # Force H.264 Codec (Sharper than VP8)
+                              capabilities = RTCRtpSender.getCapabilities("video")
+                              prefs = [c for c in capabilities.codecs if c.mimeType == "video/H264"]
+                              if prefs:
+                                  transceiver.setCodecPreferences(prefs)
+                                  print("Codec set to H.264")
+                              else:
+                                  print("H.264 not available, falling back to default.")
+
+                              # 4. Force High Bitrate (3 Mbps)
+                              # This is done by modifying the sender parameters
+                              sender = transceiver.sender
+                              params = sender.getParameters()
+                              if not params.encodings:
+                                  # If encodings list is empty, create a default one
+                                  from aiortc.rtcrtpparameters import RTCRtpEncodingParameters
+                                  params.encodings = [RTCRtpEncodingParameters(maxBitrate=3000000)]
+                              else:
+                                  params.encodings[0].maxBitrate = 3000000
+                              
+                              await sender.setParameters(params)
+
                           except Exception as e:
-                              print(f"SCREEN CAPTURE FAILED: {e}")
-                              # Fallback try index 0
-                              try:
-                                  player = MediaPlayer("0", format="avfoundation", options={"framerate": "30", "pixel_format": "uyvy422"})
-                                  pc.addTrack(player.video)
-                              except:
-                                  print("FATAL: Could not capture screen.")
-                                  return
+                              print(f"Media Error: {e}")
+                              return
 
-                          # 2. Data Channel for Input & Resizing
                           dc = pc.createDataChannel("input")
+                          await handle_input(dc, pc)
+
+                          offer = await pc.createOffer()
+                          await pc.setLocalDescription(offer)
                           
-                          @dc.on("open")
-                          def on_open():
-                              print("DataChannel Open")
-
-                          @dc.on("message")
-                          def on_input(msg):
-                              try:
-                                  data = json.loads(msg)
-                                  t = data.get('type')
-                                  
-                                  # Get current resolution for coordinate mapping
-                                  sw, sh = get_screen_dimensions()
-
-                                  if t == 'resize':
-                                      # Update Host Resolution to fit Client
-                                      match_resolution(data['width'], data['height'])
-
-                                  elif t == 'mousemove':
-                                      x, y = int(data['x'] * sw), int(data['y'] * sh)
-                                      mouse.position = (x, y)
-                                  
-                                  elif t == 'mousedown':
-                                      btn = Button.left
-                                      if data['button'] == 2: btn = Button.right
-                                      elif data['button'] == 1: btn = Button.middle
-                                      mouse.press(btn)
-                                      
-                                  elif t == 'mouseup':
-                                      btn = Button.left
-                                      if data['button'] == 2: btn = Button.right
-                                      elif data['button'] == 1: btn = Button.middle
-                                      mouse.release(btn)
-                                      
-                                  elif t == 'wheel':
-                                      mouse.scroll(-data.get('deltaX', 0)*0.1, -data.get('deltaY', 0)*0.1)
-                                      
-                                  elif t == 'keydown':
-                                      k = data['key']
-                                      if k in KEY_MAP: keyboard.press(KEY_MAP[k])
-                                      elif len(k) == 1: keyboard.press(k)
-                                      
-                                  elif t == 'keyup':
-                                      k = data['key']
-                                      if k in KEY_MAP: keyboard.release(KEY_MAP[k])
-                                      elif len(k) == 1: keyboard.release(k)
-                                      
-                              except Exception as e:
-                                  print(f"Input Error: {e}")
-
-                          # 3. Create Offer
-                          await pc.setLocalDescription(await pc.createOffer())
                           await ws.send(json.dumps({
-                              "type": pc.localDescription.type, 
+                              "type": pc.localDescription.type,
                               "sdp": pc.localDescription.sdp
                           }))
-                          print("Offer sent.")
 
                       else:
-                          # Handle Answer
                           try:
-                              data = json.loads(message)
-                              if data.get("type") == "answer" and pc:
-                                  await pc.setRemoteDescription(RTCSessionDescription(
-                                      sdp=data["sdp"], type=data["type"]
-                                  ))
-                                  print("Remote description set.")
+                              data = json.loads(msg)
+                              if data.get("type") == "answer":
+                                  await pc.setRemoteDescription(RTCSessionDescription(sdp=data["sdp"], type=data["type"]))
                           except:
                               pass
-                              
+                      
                       await asyncio.sleep(0.01)
 
           if __name__ == "__main__":
