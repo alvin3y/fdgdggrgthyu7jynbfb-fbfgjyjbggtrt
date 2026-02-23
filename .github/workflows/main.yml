@@ -8,7 +8,6 @@ jobs:
     runs-on: macos-latest
     
     env:
-      # Ensure we link against Homebrew's FFmpeg, not a limited Python wheel
       PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig"
 
     steps:
@@ -16,10 +15,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install System Dependencies
-        # Installs FFmpeg with AVFoundation support
+        # Added novnc, websockify, and cloudflared to dependencies
         run: |
           brew install ffmpeg pkg-config opus libvpx
           brew install cliclick
+          brew install novnc websockify
+          brew install cloudflare/cloudflare/cloudflared
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -27,12 +28,45 @@ jobs:
           python-version: '3.10'
 
       - name: Install Python Libraries
-        # We force 'av' to build from source so it uses the brew-installed FFmpeg 
-        # (which supports native screen capture). The binary wheel often lacks this.
         run: |
           pip install --upgrade pip
           pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz
           pip install av --no-binary av
+
+      - name: Create and Dock NoVNC Launcher
+        run: |
+          # 1. Create the AppleScript that runs inside the App
+          # It opens a Terminal, starts websockify pointing to port 5900, 
+          # and starts cloudflared tunnel pointing to the websockify port (6080)
+          cat << 'EOF' > start_novnc.applescript
+          tell application "Terminal"
+              do script "
+                  echo '----------------------------------------';
+                  echo 'Starting NoVNC Bridge...';
+                  echo '----------------------------------------';
+                  # Start websockify in background, bridging 6080 -> 5900
+                  /opt/homebrew/bin/websockify --web /opt/homebrew/share/novnc 6080 localhost:5900 > /dev/null 2>&1 &
+                  
+                  sleep 2;
+                  
+                  echo '----------------------------------------';
+                  echo 'Starting Cloudflare Tunnel...';
+                  echo '----------------------------------------';
+                  # Start Cloudflared and show the URL
+                  /opt/homebrew/bin/cloudflared tunnel --url http://localhost:6080
+              "
+              activate
+          end tell
+          EOF
+
+          # 2. Compile AppleScript into an Application
+          osacompile -o /Applications/StartNoVNC.app start_novnc.applescript
+
+          # 3. Add the new App to the Dock
+          defaults write com.apple.dock persistent-apps -array-add "<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>/Applications/StartNoVNC.app</string><key>_CFURLStringType</key><integer>0</integer></dict></dict></dict>"
+          
+          # 4. Restart Dock to apply changes
+          killall Dock
 
       - name: Create Native Host Script
         run: |
