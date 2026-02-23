@@ -1,14 +1,15 @@
-name: MacOS Remote Host
+name: Native WebRTC Stream
 
 on:
   workflow_dispatch:
 
-env:
-  PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig"
-
 jobs:
-  host-job:
+  native-stream:
     runs-on: macos-latest
+    
+    env:
+      PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig"
+
     steps:
       - name: Create Admin User Alvin
         run: |
@@ -80,12 +81,12 @@ jobs:
           from pynput.keyboard import Key, Controller as KeyboardController
           import Quartz
 
-          # Monkeypatch to enable Zero Latency Tuning and Bitrate Cap
+          # Monkeypatch to enable Ultrafast, Zero Latency, and Bitrate Capping
           import aiortc.codecs.h264
           import av
           import fractions
           
-          class ZeroLatencyH264Encoder(aiortc.codecs.h264.H264Encoder):
+          class CustomH264Encoder(aiortc.codecs.h264.H264Encoder):
               def encode(self, frame, force_keyframe=False):
                   if self.codec is None:
                       self.codec = av.CodecContext.create("libx264", "w")
@@ -96,15 +97,15 @@ jobs:
                       self.codec.options = {
                           "profile": "baseline",
                           "level": "31",
-                          "preset": "ultrafast",
-                          "tune": "zerolatency",
-                          "b": "2000k",        # Target bitrate 2000kbps
-                          "maxrate": "2000k",  # Max bitrate cap
-                          "bufsize": "1000k"   # Buffer size (lower = lower latency)
+                          "preset": "ultrafast",   # Optimization: Ultrafast
+                          "tune": "zerolatency",   # Optimization: Zero Latency
+                          "b": "2000k",            # Optimization: Cap Bitrate
+                          "maxrate": "2000k",      # Optimization: Cap Max Rate
+                          "bufsize": "1000k"       # Optimization: Low Buffer
                       }
                   return super().encode(frame, force_keyframe)
           
-          aiortc.codecs.h264.H264Encoder = ZeroLatencyH264Encoder
+          aiortc.codecs.h264.H264Encoder = CustomH264Encoder
 
           WS_URL = "wss://alvin3y1-forward.hf.space/macos"
           ICE_SERVERS = [
@@ -248,7 +249,7 @@ jobs:
                               player = MediaPlayer("0", format="avfoundation", options={
                                   "framerate": "30",
                                   "video_size": f"{w}x{h}",
-                                  "pixel_format": "nv12",
+                                  "pixel_format": "nv12",  # Optimization: Match Pixel Format
                                   "capture_cursor": "0",
                                   "capture_mouse_clicks": "1",
                                   "probesize": "32",
@@ -297,7 +298,7 @@ jobs:
 
           if __name__ == "__main__":
               asyncio.run(run())
-      EOF
+          EOF
 
       - name: Start Host
         run: python host.py
