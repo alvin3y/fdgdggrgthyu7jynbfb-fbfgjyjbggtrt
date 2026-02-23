@@ -15,12 +15,17 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install System Dependencies
-        # Added novnc, websockify, and cloudflared to dependencies
+        # Changed: Removed 'novnc' (does not exist in brew), added websockify and cloudflared
         run: |
           brew install ffmpeg pkg-config opus libvpx
           brew install cliclick
-          brew install novnc websockify
+          brew install websockify
           brew install cloudflare/cloudflare/cloudflared
+
+      - name: Setup noVNC
+        # We clone noVNC manually since it's just web files
+        run: |
+          git clone https://github.com/novnc/noVNC.git /Users/runner/noVNC
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -35,37 +40,43 @@ jobs:
 
       - name: Create and Dock NoVNC Launcher
         run: |
-          # 1. Create the AppleScript that runs inside the App
-          # It opens a Terminal, starts websockify pointing to port 5900, 
-          # and starts cloudflared tunnel pointing to the websockify port (6080)
-          cat << 'EOF' > start_novnc.applescript
+          # 1. Create a helper shell script to run the servers
+          cat << 'EOF' > /Users/runner/start_novnc.sh
+          #!/bin/bash
+          export PATH="/opt/homebrew/bin:$PATH"
+          
+          echo "----------------------------------------"
+          echo "Starting noVNC Bridge..."
+          echo "----------------------------------------"
+          # Bridge web port 6080 to VNC port 5900 using the noVNC web files
+          websockify --web /Users/runner/noVNC 6080 localhost:5900 > /dev/null 2>&1 &
+          
+          sleep 2
+          
+          echo "----------------------------------------"
+          echo "Starting Cloudflare Tunnel..."
+          echo "    (Wait for URL below)"
+          echo "----------------------------------------"
+          # Start tunnel and output the URL to the terminal
+          cloudflared tunnel --url http://localhost:6080
+          EOF
+          chmod +x /Users/runner/start_novnc.sh
+
+          # 2. Create an AppleScript that opens Terminal and runs the shell script
+          cat << 'EOF' > /Users/runner/start_novnc.applescript
           tell application "Terminal"
-              do script "
-                  echo '----------------------------------------';
-                  echo 'Starting NoVNC Bridge...';
-                  echo '----------------------------------------';
-                  # Start websockify in background, bridging 6080 -> 5900
-                  /opt/homebrew/bin/websockify --web /opt/homebrew/share/novnc 6080 localhost:5900 > /dev/null 2>&1 &
-                  
-                  sleep 2;
-                  
-                  echo '----------------------------------------';
-                  echo 'Starting Cloudflare Tunnel...';
-                  echo '----------------------------------------';
-                  # Start Cloudflared and show the URL
-                  /opt/homebrew/bin/cloudflared tunnel --url http://localhost:6080
-              "
+              do script "/Users/runner/start_novnc.sh"
               activate
           end tell
           EOF
 
-          # 2. Compile AppleScript into an Application
-          osacompile -o /Applications/StartNoVNC.app start_novnc.applescript
+          # 3. Compile the AppleScript into an Application (.app)
+          osacompile -o /Users/runner/Desktop/StartNoVNC.app /Users/runner/start_novnc.applescript
 
-          # 3. Add the new App to the Dock
-          defaults write com.apple.dock persistent-apps -array-add "<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>/Applications/StartNoVNC.app</string><key>_CFURLStringType</key><integer>0</integer></dict></dict></dict>"
+          # 4. Inject the App into the Dock
+          defaults write com.apple.dock persistent-apps -array-add "<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>/Users/runner/Desktop/StartNoVNC.app</string><key>_CFURLStringType</key><integer>0</integer></dict></dict></dict>"
           
-          # 4. Restart Dock to apply changes
+          # 5. Restart Dock to make the icon appear
           killall Dock
 
       - name: Create Native Host Script
