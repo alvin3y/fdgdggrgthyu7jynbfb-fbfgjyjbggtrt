@@ -14,14 +14,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install System Dependencies
+      - name: Install Dependencies & Create Admin User 'Alvin'
         run: |
+          # 1. Install System Dependencies
           brew install ffmpeg pkg-config opus libvpx
           brew install cliclick
           brew install cloudflare/cloudflare/cloudflared
           
-          # --- USER CREATION: ALVIN ---
-          # 1. Create user 'Alvin'
+          # 2. Create user 'Alvin'
+          echo "Creating user Alvin..."
           sudo dscl . -create /Users/Alvin
           sudo dscl . -create /Users/Alvin UserShell /bin/zsh
           sudo dscl . -create /Users/Alvin RealName "Alvin"
@@ -29,43 +30,51 @@ jobs:
           sudo dscl . -create /Users/Alvin PrimaryGroupID 20
           sudo dscl . -create /Users/Alvin NFSHomeDirectory /Users/Alvin
           
-          # 2. Set password to 'alvin2007'
+          # 3. Set password to 'alvin2007'
           sudo dscl . -passwd /Users/Alvin "alvin2007"
           
-          # 3. Add to admin group
+          # 4. Grant Administrator Privileges (Add to admin group)
           sudo dscl . -append /Groups/admin GroupMembership Alvin
           
-          # 4. Create home directory
+          # 5. Enable Passwordless Sudo for Alvin (True Admin Control)
+          echo "Alvin ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/alvin
+          
+          # 6. Create Home Directory
           sudo createhomedir -c -u Alvin > /dev/null
 
-          # --- VNC SETUP ---
-          # Enable Native Screen Sharing (VNC) with password 'alvin2007'
+          # 7. Configure VNC with Alvin's password
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
           -activate -configure -access -on \
           -clientopts -setvnclegacy -vnclegacy yes \
           -clientopts -setvncpw -vncpw "alvin2007" \
           -restart -agent -privs -all
 
-      - name: Setup noVNC and Websockify
+      - name: Setup noVNC (As Alvin)
         run: |
-          git clone https://github.com/novnc/noVNC.git /Users/runner/noVNC
-          git clone https://github.com/novnc/websockify.git /Users/runner/websockify
+          # Create a tools directory for Alvin
+          sudo -u Alvin mkdir -p /Users/Alvin/tools
+          
+          # Clone tools directly as Alvin so he owns them
+          sudo -u Alvin git clone https://github.com/novnc/noVNC.git /Users/Alvin/tools/noVNC
+          sudo -u Alvin git clone https://github.com/novnc/websockify.git /Users/Alvin/tools/websockify
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Install Python Libraries
+      - name: Install Python Libraries (System-Wide)
         run: |
-          pip install --upgrade pip
-          pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz
-          pip install av --no-binary av
+          # Install libraries globally so Alvin can access them
+          sudo pip install --upgrade pip
+          sudo pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz
+          sudo pip install av --no-binary av
 
-      - name: Create and Dock NoVNC Launcher
+      - name: Create and Dock NoVNC Launcher (As Alvin)
         run: |
           # 1. Create the helper shell script
-          cat << 'EOF' > /Users/runner/start_novnc.sh
+          # We write it to a temp file first, then move it to Alvin's folder with correct permissions
+          cat << 'EOF' > start_novnc.sh
           #!/bin/bash
           export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
           
@@ -73,7 +82,7 @@ jobs:
           echo "Starting noVNC Bridge (Web Port 6080 -> VNC 5900)..."
           echo "----------------------------------------"
           
-          /Users/runner/websockify/run 6080 localhost:5900 --web=/Users/runner/noVNC > /tmp/novnc.log 2>&1 &
+          /Users/Alvin/tools/websockify/run 6080 localhost:5900 --web=/Users/Alvin/tools/noVNC > /tmp/novnc.log 2>&1 &
           
           sleep 2
           
@@ -85,26 +94,31 @@ jobs:
           cloudflared tunnel --url http://localhost:6080
           EOF
           
-          chmod +x /Users/runner/start_novnc.sh
+          # Move to Alvin's tools and set executable
+          sudo mv start_novnc.sh /Users/Alvin/tools/start_novnc.sh
+          sudo chown Alvin:staff /Users/Alvin/tools/start_novnc.sh
+          sudo chmod +x /Users/Alvin/tools/start_novnc.sh
 
           # 2. Create the AppleScript wrapper
-          cat << 'EOF' > /Users/runner/start_novnc.applescript
+          cat << 'EOF' > start_novnc.applescript
           tell application "Terminal"
-              do script "/Users/runner/start_novnc.sh"
+              do script "/Users/Alvin/tools/start_novnc.sh"
               activate
           end tell
           EOF
-
-          # 3. Compile into an Application
-          osacompile -o /Users/runner/Desktop/StartNoVNC.app /Users/runner/start_novnc.applescript
-
-          # 4. Add to Dock
-          defaults write com.apple.dock persistent-apps -array-add "<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>/Users/runner/Desktop/StartNoVNC.app</string><key>_CFURLStringType</key><integer>0</integer></dict></dict></dict>"
           
-          # 5. Refresh Dock
-          killall Dock
+          # 3. Compile App as Alvin
+          # Ensure Desktop exists
+          sudo -u Alvin mkdir -p /Users/Alvin/Desktop
+          sudo -u Alvin osacompile -o /Users/Alvin/Desktop/StartNoVNC.app start_novnc.applescript
 
-      - name: Create Native Host Script
+          # 4. Add to Alvin's Dock
+          sudo -u Alvin defaults write com.apple.dock persistent-apps -array-add "<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>/Users/Alvin/Desktop/StartNoVNC.app</string><key>_CFURLStringType</key><integer>0</integer></dict></dict></dict>"
+          
+          # 5. Restart Dock to apply changes
+          sudo killall Dock || true
+
+      - name: Create Native Host Script (For Alvin)
         run: |
           cat << 'EOF' > host.py
           import asyncio
@@ -218,9 +232,6 @@ jobs:
                           pc = RTCPeerConnection(config)
                           
                           # --- NATIVE STREAMING SETUP ---
-                          # We use avfoundation via FFmpeg
-                          # "0" is the main screen ID
-                          # "pixel_format": "uyvy422" is the raw mac format
                           try:
                               player = MediaPlayer("0", format="avfoundation", options={
                                   "framerate": "30",
@@ -267,6 +278,13 @@ jobs:
           if __name__ == "__main__":
               asyncio.run(run())
           EOF
+          
+          # Move script to Alvin's home and set ownership
+          sudo mv host.py /Users/Alvin/host.py
+          sudo chown Alvin:staff /Users/Alvin/host.py
 
-      - name: Start Host
-        run: python host.py
+      - name: Start Host (As Alvin)
+        run: |
+          # Run the main script as the user Alvin
+          # We export PATH so Alvin sees the Homebrew installed packages
+          sudo -u Alvin PATH=$PATH:/opt/homebrew/bin PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig" python /Users/Alvin/host.py
