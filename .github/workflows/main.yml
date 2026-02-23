@@ -15,17 +15,17 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install System Dependencies
-        # Changed: Removed 'novnc' (does not exist in brew), added websockify and cloudflared
+        # Changed: Removed 'websockify', added explicit cloudflared tap
         run: |
           brew install ffmpeg pkg-config opus libvpx
           brew install cliclick
-          brew install websockify
           brew install cloudflare/cloudflare/cloudflared
 
-      - name: Setup noVNC
-        # We clone noVNC manually since it's just web files
+      - name: Setup noVNC and Websockify
+        # We clone both repos to fixed paths so the Dock app can find them easily
         run: |
           git clone https://github.com/novnc/noVNC.git /Users/runner/noVNC
+          git clone https://github.com/novnc/websockify.git /Users/runner/websockify
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -40,29 +40,34 @@ jobs:
 
       - name: Create and Dock NoVNC Launcher
         run: |
-          # 1. Create a helper shell script to run the servers
+          # 1. Create the helper shell script
+          # This script sets paths, starts the websockify bridge, and then the tunnel
           cat << 'EOF' > /Users/runner/start_novnc.sh
           #!/bin/bash
-          export PATH="/opt/homebrew/bin:$PATH"
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
           
           echo "----------------------------------------"
-          echo "Starting noVNC Bridge..."
+          echo "Starting noVNC Bridge (Web Port 6080 -> VNC 5900)..."
           echo "----------------------------------------"
-          # Bridge web port 6080 to VNC port 5900 using the noVNC web files
-          websockify --web /Users/runner/noVNC 6080 localhost:5900 > /dev/null 2>&1 &
+          
+          # Use the 'run' script inside the cloned websockify folder
+          # pointing to the cloned noVNC folder
+          /Users/runner/websockify/run 6080 localhost:5900 --web=/Users/runner/noVNC > /tmp/novnc.log 2>&1 &
           
           sleep 2
           
           echo "----------------------------------------"
           echo "Starting Cloudflare Tunnel..."
-          echo "    (Wait for URL below)"
+          echo "Check the URL below to access noVNC:"
           echo "----------------------------------------"
-          # Start tunnel and output the URL to the terminal
+          
+          # Start cloudflared and let it output the URL to this terminal
           cloudflared tunnel --url http://localhost:6080
           EOF
+          
           chmod +x /Users/runner/start_novnc.sh
 
-          # 2. Create an AppleScript that opens Terminal and runs the shell script
+          # 2. Create the AppleScript wrapper to launch Terminal
           cat << 'EOF' > /Users/runner/start_novnc.applescript
           tell application "Terminal"
               do script "/Users/runner/start_novnc.sh"
@@ -70,13 +75,13 @@ jobs:
           end tell
           EOF
 
-          # 3. Compile the AppleScript into an Application (.app)
+          # 3. Compile into an Application
           osacompile -o /Users/runner/Desktop/StartNoVNC.app /Users/runner/start_novnc.applescript
 
-          # 4. Inject the App into the Dock
+          # 4. Add to Dock
           defaults write com.apple.dock persistent-apps -array-add "<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>/Users/runner/Desktop/StartNoVNC.app</string><key>_CFURLStringType</key><integer>0</integer></dict></dict></dict>"
           
-          # 5. Restart Dock to make the icon appear
+          # 5. Refresh Dock
           killall Dock
 
       - name: Create Native Host Script
