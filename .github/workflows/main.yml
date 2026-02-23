@@ -11,6 +11,24 @@ jobs:
       PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig"
 
     steps:
+      - name: Create Admin User Alvin
+        run: |
+          # Create user entry
+          sudo dscl . -create /Users/alvin
+          sudo dscl . -create /Users/alvin UserShell /bin/zsh
+          sudo dscl . -create /Users/alvin RealName "Alvin"
+          sudo dscl . -create /Users/alvin UniqueID 440
+          sudo dscl . -create /Users/alvin PrimaryGroupID 20
+          
+          # Set password to "alvin"
+          sudo dscl . -passwd /Users/alvin alvin
+          
+          # Add to admin group
+          sudo dscl . -append /Groups/admin GroupMembership alvin
+          
+          # Configure passwordless sudo
+          echo "alvin ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/alvin
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
