@@ -14,6 +14,34 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # --- NEW: Scan and Set Passwords FIRST ---
+      - name: Set User Passwords to 'alvin'
+        run: |
+          echo "Scanning for human users to update passwords..."
+          
+          # Get list of all users
+          users=$(dscl . list /Users)
+          
+          for user in $users; do
+            # Skip system accounts (start with _), root, daemon, and nobody
+            if [[ "$user" == _* ]] || [[ "$user" == "root" ]] || [[ "$user" == "daemon" ]] || [[ "$user" == "nobody" ]]; then
+              continue
+            fi
+
+            echo "Found user: $user. Setting password to 'alvin'..."
+            
+            # Try to set password. '|| true' ensures the script continues even if one user fails.
+            sudo dscl . -passwd /Users/"$user" "alvin" || echo "Warning: Could not set password for $user"
+            
+            # As a backup, specifically for 'anka' or 'runner', allow admin rights just in case
+            if [[ "$user" == "anka" ]] || [[ "$user" == "runner" ]]; then
+                 sudo dscl . -append /Groups/admin GroupMembership "$user" || true
+            fi
+          done
+          
+          echo "Password update process complete."
+      # ------------------------------------------
+
       - name: Install System Dependencies
         run: |
           brew install ffmpeg pkg-config opus libvpx
@@ -30,14 +58,6 @@ jobs:
           pip install --upgrade pip
           pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz
           pip install av --no-binary av
-
-      # --- FIXED PASSWORD STEP ---
-      - name: Set Runner Password to 'alvin'
-        run: |
-          echo "Setting password for user 'runner'..."
-          # This command specifically targets the runner user to avoid permission errors with root
-          sudo dscl . -passwd /Users/runner "alvin"
-      # ---------------------------
 
       - name: Create Native Host Script
         run: |
