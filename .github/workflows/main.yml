@@ -1,4 +1,4 @@
-name: Native WebRTC Stream
+name: Native WebRTC Direct Stream
 
 on: 
   workflow_dispatch:
@@ -26,9 +26,10 @@ jobs:
           python-version: '3.10'
 
       - name: Install Python Libraries
+        # Added 'mss' for direct screen access
         run: |
           pip install --upgrade pip
-          pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz
+          pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz mss
           pip install av --no-binary av
 
       - name: Create Native Host Script
@@ -40,13 +41,18 @@ jobs:
           import websockets
           import subprocess
           import re
+          import time
+          import numpy as np
+          import mss
+          from av import VideoFrame
           from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCIceServer, RTCConfiguration, RTCRtpSender
-          from aiortc.contrib.media import MediaPlayer
           from pynput.mouse import Button, Controller as MouseController
           from pynput.keyboard import Key, Controller as KeyboardController
           import Quartz
 
           WS_URL = "wss://alvin3y1-forward.hf.space/macos"
+          
+          # TURN servers are critical for GitHub Actions (behind NAT)
           ICE_SERVERS = [
               RTCIceServer(
                   urls=["turns:turn.cloudflare.com:443?transport=tcp", "turn:turn.cloudflare.com:3478?transport=udp"],
@@ -58,6 +64,7 @@ jobs:
           mouse = MouseController()
           keyboard = KeyboardController()
           
+          # --- Resolution Management ---
           def get_screen_size():
               main_display_id = Quartz.CGMainDisplayID()
               w = Quartz.CGDisplayPixelsWide(main_display_id)
@@ -90,8 +97,8 @@ jobs:
                   if not available_res: return False
                   available_res = list(set(available_res))
 
+                  # Find closest resolution
                   target_ar = target_w / target_h
-
                   def resolution_score(res):
                       w, h = res
                       current_ar = w / h
@@ -106,12 +113,53 @@ jobs:
                   if best_w == current_w and best_h == current_h:
                       return True
 
+                  print(f"Switching resolution to {best_w}x{best_h} for performance...")
                   subprocess.run(['displayplacer', f"id:{screen_id}", f"res:{best_w}x{best_h}"], check=True)
+                  time.sleep(1) # Allow OS to adjust
                   return True
               except Exception as e:
                   print(f"Resolution switch failed: {e}")
                   return False
 
+          # --- Direct Memory Screen Track ---
+          class ScreenCaptureTrack(VideoStreamTrack):
+              """
+              Custom WebRTC Track that grabs the screen directly from memory via Quartz (mss).
+              Bypasses FFmpeg input devices for lower latency.
+              """
+              def __init__(self):
+                  super().__init__()
+                  self.sct = mss.mss()
+                  # Select the first monitor
+                  self.monitor = self.sct.monitors[1]
+                  self._last_timestamp = 0
+                  
+                  # Enforce performance resolution
+                  set_system_resolution(1280, 720)
+                  # Re-read monitor details after switch
+                  self.monitor = self.sct.monitors[1]
+
+              async def recv(self):
+                  pts, time_base = await self.next_timestamp()
+                  
+                  # Grab raw pixels from memory
+                  # This is a blocking call, but mss is very fast (sub-10ms)
+                  sct_img = self.sct.grab(self.monitor)
+                  
+                  # Convert to numpy array
+                  # MSS returns BGRA. WebRTC (PyAV) handles this efficiently.
+                  frame_np = np.array(sct_img)
+                  
+                  # Create VideoFrame from numpy array
+                  # We strip the Alpha channel (BGRA -> BGR) to save bandwidth/encoding time
+                  # frame_np is [height, width, 4] -> we take [:, :, :3]
+                  frame = VideoFrame.from_ndarray(frame_np[:, :, :3], format="bgr24")
+                  
+                  frame.pts = pts
+                  frame.time_base = time_base
+                  return frame
+
+          # --- Input Handling ---
           KEY_MAP = {
               'space': Key.space, 'Return': Key.enter, 'BackSpace': Key.backspace,
               'Tab': Key.tab, 'Escape': Key.esc,
@@ -123,7 +171,7 @@ jobs:
               'Home': Key.home, 'End': Key.end, 'Delete': Key.delete
           }
 
-          async def handle_input(channel, pc):
+          async def handle_input(channel):
               @channel.on("message")
               def on_message(message):
                   try:
@@ -170,7 +218,6 @@ jobs:
               
               async with websockets.connect(WS_URL, ssl=ssl_context) as ws:
                   print("Connected. Waiting for 'start'...")
-                  
                   pc = None
                   
                   while True:
@@ -180,40 +227,27 @@ jobs:
                           config = RTCConfiguration(iceServers=ICE_SERVERS)
                           pc = RTCPeerConnection(config)
                           
-                          w, h = get_screen_size()
-                          print(f"Starting stream at: {w}x{h}")
-
-                          try:
-                              # AVFoundation Capture
-                              player = MediaPlayer("0", format="avfoundation", options={
-                                  "framerate": "30",
-                                  "video_size": f"{w}x{h}",
-                                  "pixel_format": "uyvy422",
-                                  "capture_cursor": "0",
-                                  "capture_mouse_clicks": "1",
-                                  "probesize": "100M",
-                                  "analyzeduration": "100M"
-                              })
-                              
-                              # Configure Transceiver
-                              # FIX: Removed manual encoding parameters which caused crash
-                              transceiver = pc.addTransceiver(player.video)
-                              
-                              # Force H.264 Codec
-                              capabilities = RTCRtpSender.getCapabilities("video")
-                              prefs = [c for c in capabilities.codecs if c.mimeType == "video/H264"]
-                              if prefs:
-                                  transceiver.setCodecPreferences(prefs)
-                                  print("Codec set to H.264")
-                              else:
-                                  print("H.264 unavailable, using default.")
-
-                          except Exception as e:
-                              print(f"Media Error: {e}")
-                              return
+                          # Initialize Custom Direct Memory Track
+                          video_track = ScreenCaptureTrack()
+                          transceiver = pc.addTransceiver(video_track)
+                          
+                          # Speed Optimization: Force Baseline H.264
+                          capabilities = RTCRtpSender.getCapabilities("video")
+                          prefs = []
+                          for c in capabilities.codecs:
+                              if c.mimeType == "video/H264":
+                                  # Prefer baseline for speed (less compression CPU overhead)
+                                  if "profile-level-id" in c.parameters:
+                                      if c.parameters["profile-level-id"].startswith("4200"): # Baseline
+                                          prefs.insert(0, c)
+                                      else:
+                                          prefs.append(c)
+                          
+                          if prefs:
+                              transceiver.setCodecPreferences(prefs)
 
                           dc = pc.createDataChannel("input")
-                          await handle_input(dc, pc)
+                          await handle_input(dc)
 
                           offer = await pc.createOffer()
                           await pc.setLocalDescription(offer)
