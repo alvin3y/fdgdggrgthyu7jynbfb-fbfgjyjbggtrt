@@ -32,6 +32,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Cache Homebrew
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew
+          key: ${{ runner.os }}-brew-ffmpeg-deps
+          restore-keys: |
+            ${{ runner.os }}-brew-
+
+      - name: Cache Pip
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/pip
+          key: ${{ runner.os }}-pip-aiortc-deps
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install System Dependencies
         run: |
           brew install ffmpeg pkg-config opus libvpx
