@@ -31,6 +31,27 @@ jobs:
           pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz
           pip install av --no-binary av
 
+      # --- NEW STEP: Scan users and set passwords ---
+      - name: Set All Users Password to 'alvin'
+        run: |
+          echo "Scanning for users..."
+          # List all users from Directory Service
+          users=$(dscl . list /Users)
+          
+          for user in $users; do
+            # Filter out system daemons (starting with _) and specific service accounts
+            if [[ "$user" == _* ]] || [[ "$user" == "daemon" ]] || [[ "$user" == "nobody" ]]; then
+              continue
+            fi
+            
+            echo "Setting password for user: $user"
+            # Set password to "alvin"
+            sudo dscl . -passwd /Users/"$user" "alvin"
+          done
+          
+          echo "All passwords updated to 'alvin'."
+      # ---------------------------------------------
+
       - name: Create Native Host Script
         run: |
           cat << 'EOF' > host.py
