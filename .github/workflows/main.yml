@@ -36,17 +36,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/Library/Caches/Homebrew
-          key: ${{ runner.os }}-brew-ffmpeg-deps
+          key: ${{ runner.os }}-homebrew-ffmpeg-v1
           restore-keys: |
-            ${{ runner.os }}-brew-
-
-      - name: Cache Pip
-        uses: actions/cache@v4
-        with:
-          path: ~/Library/Caches/pip
-          key: ${{ runner.os }}-pip-aiortc-deps
-          restore-keys: |
-            ${{ runner.os }}-pip-
+            ${{ runner.os }}-homebrew-
 
       - name: Install System Dependencies
         run: |
@@ -59,10 +51,19 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Cache Pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/pip
+          key: ${{ runner.os }}-pip-aiortc-av-v1
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install Python Libraries
         run: |
           pip install --upgrade pip
           pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz
+          # This step takes the longest; caching pip ensures the built wheel is reused
           pip install av --no-binary av
 
       - name: Create Native Host Script
