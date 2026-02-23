@@ -17,9 +17,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           brew install ffmpeg pkg-config opus libvpx
-          brew install cliclick
-          # displayplacer allows changing resolution via CLI
-          brew install displayplacer
+          # Removed displayplacer (not supported on M2 Runner VMs)
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -41,10 +39,10 @@ jobs:
           import websockets
           import subprocess
           import re
-          from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCIceServer, RTCConfiguration
+          from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
           from aiortc.contrib.media import MediaPlayer
           from pynput.mouse import Button, Controller as MouseController
-          from pynput.keyboard import Key, Controller as KeyboardController
+          from pynput.keyboard import Controller as KeyboardController
           import Quartz
 
           WS_URL = "wss://alvin3y1-forward.hf.space/macos"
@@ -58,139 +56,64 @@ jobs:
 
           mouse = MouseController()
           keyboard = KeyboardController()
-          
-          # Global reference to the media player to restart it if resolution changes
-          current_player = None
-          
+
           def get_screen_size():
               main_display_id = Quartz.CGMainDisplayID()
               w = Quartz.CGDisplayPixelsWide(main_display_id)
               h = Quartz.CGDisplayPixelsHigh(main_display_id)
               return w, h
 
-          def set_system_resolution(target_w, target_h):
-              """
-              Uses displayplacer to switch the macOS system resolution.
-              Since VMs have limited resolutions, we look for the available one
-              that best matches the requested aspect ratio and size.
-              """
+          # Helper to find the actual Screen device index (avoids Camera error)
+          def get_avfoundation_device():
               try:
-                  # 1. Get list of available resolutions
-                  result = subprocess.run(['displayplacer', 'list'], capture_output=True, text=True)
-                  output = result.stdout
+                  cmd = ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""]
+                  result = subprocess.run(cmd, capture_output=True, text=True)
+                  output = result.stderr
                   
-                  # Parse main display ID
-                  id_match = re.search(r'Persistent screen id: ([^ \n]+)', output)
-                  if not id_match: return False
-                  screen_id = id_match.group(1)
+                  # Look for "[index] Capture screen"
+                  match = re.search(r'\[(\d+)\] Capture screen', output)
+                  if match:
+                      idx = match.group(1)
+                      print(f"Found Screen at Index: {idx}")
+                      return idx
+              except:
+                  pass
+              print("Defaulting to input '1'")
+              return "1" 
 
-                  # 2. Find closest resolution
-                  # Helper to parse "Resolution: 1280x720" lines
-                  available_res = []
-                  for line in output.split('\n'):
-                      if "Resolution:" in line:
-                          parts = line.split(':')[1].strip().split('x')
-                          if len(parts) >= 2:
-                              w = int(parts[0])
-                              # Handles cases like "1280x720@60Hz"
-                              h = int(parts[1].split('@')[0].split(' ')[0])
-                              available_res.append((w, h))
-
-                  if not available_res: return False
-
-                  # Logic: Find resolution with closest width that is <= target
-                  # This prevents setting a resolution higher than the VM can render
-                  best_w, best_h = available_res[0]
-                  min_diff = float('inf')
-
-                  for w, h in available_res:
-                      diff = abs(w - target_w) + abs(h - target_h)
-                      if diff < min_diff:
-                          min_diff = diff
-                          best_w, best_h = w, h
-
-                  print(f"Changing System Resolution to: {best_w}x{best_h} (Requested: {target_w}x{target_h})")
-                  subprocess.run(['displayplacer', f"id:{screen_id}", f"res:{best_w}x{best_h}"], check=True)
-                  return True
-              except Exception as e:
-                  print(f"Resolution switch failed: {e}")
-                  return False
-
-          KEY_MAP = {
-              'space': Key.space, 'Return': Key.enter, 'BackSpace': Key.backspace,
-              'Tab': Key.tab, 'Escape': Key.esc,
-              'Control_L': Key.ctrl_l, 'Control_R': Key.ctrl_r,
-              'Shift_L': Key.shift, 'Shift_R': Key.shift_r,
-              'Alt_L': Key.alt, 'Alt_R': Key.alt_r,
-              'Super_L': Key.cmd, 'cmd': Key.cmd,
-              'Up': Key.up, 'Down': Key.down, 'Left': Key.left, 'Right': Key.right,
-              'Home': Key.home, 'End': Key.end, 'Delete': Key.delete
-          }
-
-          async def handle_input(channel, pc):
+          async def handle_input(channel):
               @channel.on("message")
               def on_message(message):
                   try:
                       data = json.loads(message)
                       t = data.get('type')
-                      
-                      # Get current dynamic resolution
                       sw, sh = get_screen_size()
 
                       if t == 'mousemove':
+                          # Coordinates are 0.0-1.0 from client, mapped to screen size
                           x = int(data['x'] * sw)
                           y = int(data['y'] * sh)
                           mouse.position = (x, y)
-                      
                       elif t == 'mousedown':
-                          btn = Button.left
-                          if data['button'] == 2: btn = Button.right
-                          elif data['button'] == 1: btn = Button.middle
-                          mouse.press(btn)
-
+                          mouse.press(Button.left)
                       elif t == 'mouseup':
-                          btn = Button.left
-                          if data['button'] == 2: btn = Button.right
-                          elif data['button'] == 1: btn = Button.middle
-                          mouse.release(btn)
-                      
-                      elif t == 'wheel':
-                          mouse.scroll(-data.get('deltaX', 0)*0.1, -data.get('deltaY', 0)*0.1)
-
+                          mouse.release(Button.left)
                       elif t == 'keydown':
-                          k = data['key']
-                          if k in KEY_MAP: keyboard.press(KEY_MAP[k])
-                          elif len(k) == 1: keyboard.press(k)
-                      
+                          keyboard.press(data['key'])
                       elif t == 'keyup':
-                          k = data['key']
-                          if k in KEY_MAP: keyboard.release(KEY_MAP[k])
-                          elif len(k) == 1: keyboard.release(k)
-                      
-                      elif t == 'resize':
-                          # Attempt to change actual OS resolution
-                          w, h = data.get('width'), data.get('height')
-                          success = set_system_resolution(w, h)
-                          
-                          # Note: Changing resolution usually requires the stream to be 
-                          # re-negotiated or the ffmpeg process usually adapts automatically 
-                          # because we set analyzeduration=0.
-                          if success:
-                              print("Resolution changed. Input mapping will update on next event.")
-
-                  except Exception as e:
-                      print(f"Input Error: {e}")
+                          keyboard.release(data['key'])
+                  except:
+                      pass
 
           async def run():
               print(f"Connecting to: {WS_URL}")
               
-              ssl_context = ssl.create_default_context()
-              ssl_context.check_hostname = False
-              ssl_context.verify_mode = ssl.CERT_NONE
+              ssl_ctx = ssl.create_default_context()
+              ssl_ctx.check_hostname = False
+              ssl_ctx.verify_mode = ssl.CERT_NONE
               
-              async with websockets.connect(WS_URL, ssl=ssl_context) as ws:
-                  print("Connected. Waiting for 'start'...")
-                  
+              async with websockets.connect(WS_URL, ssl=ssl_ctx) as ws:
+                  print("Connected.")
                   pc = None
                   
                   while True:
@@ -200,31 +123,22 @@ jobs:
                           config = RTCConfiguration(iceServers=ICE_SERVERS)
                           pc = RTCPeerConnection(config)
                           
-                          w, h = get_screen_size()
-                          print(f"Starting stream at: {w}x{h}")
-
-                          # AVFoundation Capture
-                          # We do NOT set video_size here, letting it default to current screen size
-                          # so it can adapt if displayplacer changes it.
-                          try:
-                              player = MediaPlayer("0", format="avfoundation", options={
-                                  "framerate": "30",
-                                  "pixel_format": "uyvy422",
-                                  "capture_cursor": "1",
-                                  "capture_mouse_clicks": "1",
-                                  "probesize": "32" 
-                              })
-                              pc.addTrack(player.video)
-                          except Exception as e:
-                              print(f"Media Error: {e}")
-                              return
-
+                          # Dynamic Screen Selection
+                          dev_idx = get_avfoundation_device()
+                          
+                          # Optimized Media Player settings
+                          player = MediaPlayer(dev_idx, format="avfoundation", options={
+                              "framerate": "30",
+                              "pixel_format": "uyvy422",
+                              "probesize": "32",
+                              "analyzeduration": "0",
+                              "video_size": f"{get_screen_size()[0]}x{get_screen_size()[1]}"
+                          })
+                          
+                          pc.addTrack(player.video)
+                          
                           dc = pc.createDataChannel("input")
-                          await handle_input(dc, pc)
-
-                          @pc.on("iceconnectionstatechange")
-                          async def on_ice_state_change():
-                              print(f"ICE State: {pc.iceConnectionState}")
+                          await handle_input(dc)
 
                           offer = await pc.createOffer()
                           await pc.setLocalDescription(offer)
@@ -239,6 +153,8 @@ jobs:
                               data = json.loads(msg)
                               if data.get("type") == "answer":
                                   await pc.setRemoteDescription(RTCSessionDescription(sdp=data["sdp"], type=data["type"]))
+                              elif data.get("candidate"):
+                                  if pc: await pc.addIceCandidate(data["candidate"])
                           except:
                               pass
                       
