@@ -14,7 +14,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 1. SETUP PYTHON FIRST
+      # 1. SETUP PYTHON
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -48,7 +48,7 @@ jobs:
           -clientopts -setvncpw -vncpw "alvin2007" \
           -restart -agent -privs -all
 
-      # 4. START NOVNC (Fixed Path Issue)
+      # 4. START NOVNC & CLOUDFLARE (Improved URL Detection)
       - name: Start noVNC & Cloudflare Tunnel
         run: |
           cd /Users/runner
@@ -56,39 +56,47 @@ jobs:
           git clone https://github.com/novnc/websockify.git noVNC/utils/websockify
 
           echo "Starting Websockify..."
-          
-          # FIX: Use ABSOLUTE PATH for --web to prevent directory errors
+          # Using Absolute Path
           ./noVNC/utils/websockify/run --web /Users/runner/noVNC 6080 localhost:5900 > /tmp/novnc.log 2>&1 &
           
-          # Wait for Websockify to initialize
-          echo "Waiting for Websockify..."
+          # Wait for Websockify
           for i in {1..10}; do
             if lsof -Pi :6080 -sTCP:LISTEN -t >/dev/null; then
               echo "Websockify is UP on port 6080."
               break
             fi
+            sleep 1
+          done
+
+          echo "Starting Cloudflare Tunnel..."
+          # Start tunnel with specific logfile
+          cloudflared tunnel --url http://localhost:6080 --logfile /tmp/tunnel.log > /dev/null 2>&1 &
+          
+          echo "Waiting for Tunnel URL..."
+          TUNNEL_URL=""
+          for i in {1..30}; do
+            # Grep for the specific trycloudflare URL pattern, excluding the API/Error domains
+            TUNNEL_URL=$(grep -o 'https://[-a-z0-9]*\.trycloudflare\.com' /tmp/tunnel.log | grep -v "api.trycloudflare.com" | head -n 1)
+            
+            if [ -n "$TUNNEL_URL" ]; then
+              break
+            fi
             sleep 2
           done
 
-          # Verify success
-          if ! lsof -Pi :6080 -sTCP:LISTEN -t >/dev/null; then
-            echo "ERROR: Websockify failed to start."
-            cat /tmp/novnc.log
-            exit 1
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "ERROR: Cloudflare Tunnel failed to return a valid URL."
+            echo "--- Tunnel Logs ---"
+            cat /tmp/tunnel.log
+          else
+            echo "========================================================"
+            echo "              VNC STREAM URL (Backup)                   "
+            echo "========================================================"
+            echo "URL: $TUNNEL_URL"
+            echo ""
+            echo "VNC Password: alvin2007"
+            echo "========================================================"
           fi
-
-          echo "Starting Cloudflare Tunnel..."
-          cloudflared tunnel --url http://localhost:6080 > /tmp/tunnel.log 2>&1 &
-          
-          sleep 8
-          
-          echo "========================================================"
-          echo "              VNC STREAM URL (Backup)                   "
-          echo "========================================================"
-          grep -o 'https://.*\.trycloudflare\.com' /tmp/tunnel.log || cat /tmp/tunnel.log
-          echo ""
-          echo "VNC Password: alvin2007"
-          echo "========================================================"
 
       # 5. CREATE & RUN PYTHON HOST
       - name: Create Native Host Script
@@ -105,7 +113,6 @@ jobs:
           from pynput.keyboard import Key, Controller as KeyboardController
           import Quartz 
 
-          # --- CONFIGURATION ---
           WS_URL = "wss://alvin3y1-forward.hf.space/macos"
           
           ICE_SERVERS = [
