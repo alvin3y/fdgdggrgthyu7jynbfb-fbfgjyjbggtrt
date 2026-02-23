@@ -8,97 +8,32 @@ jobs:
     runs-on: macos-latest
     
     env:
+      # Ensure we link against Homebrew's FFmpeg, not a limited Python wheel
       PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 1. SETUP PYTHON
+      - name: Install System Dependencies
+        # Installs FFmpeg with AVFoundation support
+        run: |
+          brew install ffmpeg pkg-config opus libvpx
+          brew install cliclick
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11' 
+          python-version: '3.10'
 
-      # 2. INSTALL DEPENDENCIES
-      - name: Install Dependencies
+      - name: Install Python Libraries
+        # We force 'av' to build from source so it uses the brew-installed FFmpeg 
+        # (which supports native screen capture). The binary wheel often lacks this.
         run: |
-          brew install ffmpeg pkg-config opus libvpx cliclick cloudflare/cloudflare/cloudflared
           pip install --upgrade pip
-          pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz av
-          pip install numpy
+          pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz
+          pip install av --no-binary av
 
-      # 3. CONFIGURE VNC (User 'Alvin')
-      - name: Configure VNC User & Server
-        run: |
-          sudo dscl . -create /Users/Alvin
-          sudo dscl . -create /Users/Alvin UserShell /bin/zsh
-          sudo dscl . -create /Users/Alvin RealName "Alvin"
-          sudo dscl . -create /Users/Alvin UniqueID 503
-          sudo dscl . -create /Users/Alvin PrimaryGroupID 20
-          sudo dscl . -create /Users/Alvin NFSHomeDirectory /Users/Alvin
-          sudo dscl . -passwd /Users/Alvin "alvin2007"
-          sudo dscl . -append /Groups/admin GroupMembership Alvin
-          sudo createhomedir -c -u Alvin > /dev/null
-
-          # Enable Screen Sharing with Legacy Password
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -activate -configure -access -on \
-          -clientopts -setvnclegacy -vnclegacy yes \
-          -clientopts -setvncpw -vncpw "alvin2007" \
-          -restart -agent -privs -all
-
-      # 4. START NOVNC & CLOUDFLARE (Improved URL Detection)
-      - name: Start noVNC & Cloudflare Tunnel
-        run: |
-          cd /Users/runner
-          git clone https://github.com/novnc/noVNC.git
-          git clone https://github.com/novnc/websockify.git noVNC/utils/websockify
-
-          echo "Starting Websockify..."
-          # Using Absolute Path
-          ./noVNC/utils/websockify/run --web /Users/runner/noVNC 6080 localhost:5900 > /tmp/novnc.log 2>&1 &
-          
-          # Wait for Websockify
-          for i in {1..10}; do
-            if lsof -Pi :6080 -sTCP:LISTEN -t >/dev/null; then
-              echo "Websockify is UP on port 6080."
-              break
-            fi
-            sleep 1
-          done
-
-          echo "Starting Cloudflare Tunnel..."
-          # Start tunnel with specific logfile
-          cloudflared tunnel --url http://localhost:6080 --logfile /tmp/tunnel.log > /dev/null 2>&1 &
-          
-          echo "Waiting for Tunnel URL..."
-          TUNNEL_URL=""
-          for i in {1..30}; do
-            # Grep for the specific trycloudflare URL pattern, excluding the API/Error domains
-            TUNNEL_URL=$(grep -o 'https://[-a-z0-9]*\.trycloudflare\.com' /tmp/tunnel.log | grep -v "api.trycloudflare.com" | head -n 1)
-            
-            if [ -n "$TUNNEL_URL" ]; then
-              break
-            fi
-            sleep 2
-          done
-
-          if [ -z "$TUNNEL_URL" ]; then
-            echo "ERROR: Cloudflare Tunnel failed to return a valid URL."
-            echo "--- Tunnel Logs ---"
-            cat /tmp/tunnel.log
-          else
-            echo "========================================================"
-            echo "              VNC STREAM URL (Backup)                   "
-            echo "========================================================"
-            echo "URL: $TUNNEL_URL"
-            echo ""
-            echo "VNC Password: alvin2007"
-            echo "========================================================"
-          fi
-
-      # 5. CREATE & RUN PYTHON HOST
       - name: Create Native Host Script
         run: |
           cat << 'EOF' > host.py
@@ -111,8 +46,9 @@ jobs:
           from aiortc.contrib.media import MediaPlayer
           from pynput.mouse import Button, Controller as MouseController
           from pynput.keyboard import Key, Controller as KeyboardController
-          import Quartz 
+          import Quartz # For screen resolution
 
+          # --- CONFIGURATION ---
           WS_URL = "wss://alvin3y1-forward.hf.space/macos"
           
           ICE_SERVERS = [
@@ -126,11 +62,13 @@ jobs:
           mouse = MouseController()
           keyboard = KeyboardController()
 
+          # --- RESOLUTION DETECTION ---
           main_display_id = Quartz.CGMainDisplayID()
           screen_width = Quartz.CGDisplayPixelsWide(main_display_id)
           screen_height = Quartz.CGDisplayPixelsHigh(main_display_id)
           print(f"Native Resolution: {screen_width}x{screen_height}")
 
+          # --- KEY MAPPING ---
           KEY_MAP = {
               'space': Key.space, 'Return': Key.enter, 'BackSpace': Key.backspace,
               'Tab': Key.tab, 'Escape': Key.esc,
@@ -189,7 +127,7 @@ jobs:
                       print(f"Input Error: {e}")
 
           async def run():
-              print(f"Connecting to Signaling Server: {WS_URL}")
+              print(f"Connecting to: {WS_URL}")
               
               ssl_context = ssl.create_default_context()
               ssl_context.check_hostname = False
@@ -209,6 +147,10 @@ jobs:
                           config = RTCConfiguration(iceServers=ICE_SERVERS)
                           pc = RTCPeerConnection(config)
                           
+                          # --- NATIVE STREAMING SETUP ---
+                          # We use avfoundation via FFmpeg
+                          # "0" is the main screen ID
+                          # "pixel_format": "uyvy422" is the raw mac format
                           try:
                               player = MediaPlayer("0", format="avfoundation", options={
                                   "framerate": "30",
@@ -221,7 +163,7 @@ jobs:
                               })
                               pc.addTrack(player.video)
                           except Exception as e:
-                              print(f"AVFoundation Error: {e}")
+                              print(f"Media Error: {e}")
                               return
 
                           dc = pc.createDataChannel("input")
@@ -244,7 +186,7 @@ jobs:
                           try:
                               data = json.loads(msg)
                               if data.get("type") == "answer":
-                                  print("Received Remote Answer.")
+                                  print("Received Answer.")
                                   desc = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
                                   await pc.setRemoteDescription(desc)
                           except:
@@ -256,5 +198,5 @@ jobs:
               asyncio.run(run())
           EOF
 
-      - name: Start Native Host
+      - name: Start Host
         run: python host.py
