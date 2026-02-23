@@ -14,17 +14,29 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install System Dependencies
-        run: |
-          brew install ffmpeg pkg-config opus libvpx
-          brew install cliclick
-          brew install cloudflare/cloudflare/cloudflared
+      # 1. SETUP PYTHON FIRST (Fixes Websockify startup error)
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11' 
 
-      - name: Configure User 'Alvin' & VNC
-        # We create user 'Alvin' so we have credentials to login via VNC.
-        # The password is set to 'alvin2007'.
+      # 2. INSTALL DEPENDENCIES
+      - name: Install Dependencies
         run: |
-          echo "Creating user Alvin..."
+          # System tools
+          brew install ffmpeg pkg-config opus libvpx cliclick cloudflare/cloudflare/cloudflared
+          
+          # Python libraries
+          pip install --upgrade pip
+          pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz av
+          
+          # Websockify needs numpy to run faster/reliably
+          pip install numpy
+
+      # 3. CONFIGURE VNC (User 'Alvin')
+      - name: Configure VNC User & Server
+        run: |
+          # Create User Alvin
           sudo dscl . -create /Users/Alvin
           sudo dscl . -create /Users/Alvin UserShell /bin/zsh
           sudo dscl . -create /Users/Alvin RealName "Alvin"
@@ -35,53 +47,56 @@ jobs:
           sudo dscl . -append /Groups/admin GroupMembership Alvin
           sudo createhomedir -c -u Alvin > /dev/null
 
-          # Configure macOS Screen Sharing (VNC)
+          # Enable Screen Sharing with Legacy Password
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
           -activate -configure -access -on \
           -clientopts -setvnclegacy -vnclegacy yes \
           -clientopts -setvncpw -vncpw "alvin2007" \
           -restart -agent -privs -all
 
-      - name: Start noVNC & Generate URL
+      # 4. START NOVNC (With Port Check)
+      - name: Start noVNC & Cloudflare Tunnel
         run: |
-          # 1. Clone noVNC and Websockify
           cd /Users/runner
           git clone https://github.com/novnc/noVNC.git
           git clone https://github.com/novnc/websockify.git noVNC/utils/websockify
 
-          # 2. Start websockify in the background (Ports: 6080 -> 5900)
-          # We use --web to serve the noVNC html files
+          echo "Starting Websockify..."
+          # We explicitly use the python environment we just set up
           ./noVNC/utils/websockify/run --web ./noVNC 6080 localhost:5900 > /tmp/novnc.log 2>&1 &
           
+          # WAIT for Port 6080 to be active (Prevents 502 Error)
+          echo "Waiting for Websockify to initialize..."
+          for i in {1..10}; do
+            if lsof -Pi :6080 -sTCP:LISTEN -t >/dev/null; then
+              echo "Websockify is UP on port 6080."
+              break
+            fi
+            echo "Waiting..."
+            sleep 2
+          done
+
+          # If it still isn't up, show logs and exit
+          if ! lsof -Pi :6080 -sTCP:LISTEN -t >/dev/null; then
+            echo "ERROR: Websockify failed to start."
+            cat /tmp/novnc.log
+            exit 1
+          fi
+
           echo "Starting Cloudflare Tunnel..."
-          
-          # 3. Start Cloudflared in the background and log output
           cloudflared tunnel --url http://localhost:6080 > /tmp/tunnel.log 2>&1 &
           
-          # 4. Wait for the tunnel to register
           sleep 8
           
-          # 5. Extract and show the URL
           echo "========================================================"
           echo "              VNC STREAM URL (Backup)                   "
           echo "========================================================"
-          echo ""
           grep -o 'https://.*\.trycloudflare\.com' /tmp/tunnel.log || cat /tmp/tunnel.log
           echo ""
-          echo "Use User: Alvin | Pass: alvin2007"
+          echo "VNC Password: alvin2007"
           echo "========================================================"
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: Install Python Libraries
-        run: |
-          pip install --upgrade pip
-          pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz
-          pip install av --no-binary av
-
+      # 5. CREATE & RUN PYTHON HOST
       - name: Create Native Host Script
         run: |
           cat << 'EOF' > host.py
@@ -97,7 +112,6 @@ jobs:
           import Quartz 
 
           # --- CONFIGURATION ---
-          # Ensure this WebSocket URL is active on your HuggingFace/Signaling server
           WS_URL = "wss://alvin3y1-forward.hf.space/macos"
           
           ICE_SERVERS = [
@@ -111,13 +125,11 @@ jobs:
           mouse = MouseController()
           keyboard = KeyboardController()
 
-          # --- RESOLUTION DETECTION ---
           main_display_id = Quartz.CGMainDisplayID()
           screen_width = Quartz.CGDisplayPixelsWide(main_display_id)
           screen_height = Quartz.CGDisplayPixelsHigh(main_display_id)
           print(f"Native Resolution: {screen_width}x{screen_height}")
 
-          # --- KEY MAPPING ---
           KEY_MAP = {
               'space': Key.space, 'Return': Key.enter, 'BackSpace': Key.backspace,
               'Tab': Key.tab, 'Escape': Key.esc,
@@ -183,7 +195,7 @@ jobs:
               ssl_context.verify_mode = ssl.CERT_NONE
               
               async with websockets.connect(WS_URL, ssl=ssl_context) as ws:
-                  print("Connected. Waiting for 'start' command from client...")
+                  print("Connected. Waiting for 'start'...")
                   
                   pc = None
                   
@@ -191,14 +203,12 @@ jobs:
                       msg = await ws.recv()
                       
                       if msg == "start":
-                          print("Start trigger received. Initializing WebRTC...")
+                          print("Start trigger received.")
                           
                           config = RTCConfiguration(iceServers=ICE_SERVERS)
                           pc = RTCPeerConnection(config)
                           
-                          # --- NATIVE STREAMING SETUP ---
                           try:
-                              # '0' is usually the default screen on macOS via AVFoundation
                               player = MediaPlayer("0", format="avfoundation", options={
                                   "framerate": "30",
                                   "video_size": f"{screen_width}x{screen_height}", 
@@ -219,8 +229,6 @@ jobs:
                           @pc.on("iceconnectionstatechange")
                           async def on_ice_state_change():
                               print(f"ICE State: {pc.iceConnectionState}")
-                              if pc.iceConnectionState == "failed":
-                                  print("ICE Connection failed.")
 
                           offer = await pc.createOffer()
                           await pc.setLocalDescription(offer)
@@ -229,7 +237,7 @@ jobs:
                               "type": pc.localDescription.type,
                               "sdp": pc.localDescription.sdp
                           }))
-                          print("Offer sent to signaling server.")
+                          print("Offer sent.")
 
                       else:
                           try:
@@ -248,5 +256,4 @@ jobs:
           EOF
 
       - name: Start Native Host
-        # Runs the Python script to stream the screen via WebRTC
         run: python host.py
