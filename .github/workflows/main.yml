@@ -8,7 +8,7 @@ jobs:
     runs-on: macos-latest
     
     env:
-      # Ensure we link against Homebrew's FFmpeg, not a limited Python wheel
+      # Ensure we link against Homebrew's FFmpeg
       PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig"
 
     steps:
@@ -27,8 +27,7 @@ jobs:
           python-version: '3.10'
 
       - name: Install Python Libraries
-        # We force 'av' to build from source so it uses the brew-installed FFmpeg 
-        # (which supports native screen capture). The binary wheel often lacks this.
+        # Compiling 'av' from source is required for full AVFoundation support on macOS runners
         run: |
           pip install --upgrade pip
           pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz
@@ -122,6 +121,14 @@ jobs:
                           k = data['key']
                           if k in KEY_MAP: keyboard.release(KEY_MAP[k])
                           elif len(k) == 1: keyboard.release(k)
+                      
+                      elif t == 'resize':
+                          # Received resolution sync from client.
+                          # Since AVFoundation capture is initialized with fixed native resolution,
+                          # we log this request. In a full implementation, this could trigger
+                          # a stream restart or encoder reconfiguration.
+                          w, h = data.get('width'), data.get('height')
+                          print(f"Client requested resize to: {w}x{h} (Keeping Native: {screen_width}x{screen_height})")
 
                   except Exception as e:
                       print(f"Input Error: {e}")
@@ -148,9 +155,8 @@ jobs:
                           pc = RTCPeerConnection(config)
                           
                           # --- NATIVE STREAMING SETUP ---
-                          # We use avfoundation via FFmpeg
-                          # "0" is the main screen ID
-                          # "pixel_format": "uyvy422" is the raw mac format
+                          # Using avfoundation via FFmpeg
+                          # pixel_format "uyvy422" is standard for macOS screen capture
                           try:
                               player = MediaPlayer("0", format="avfoundation", options={
                                   "framerate": "30",
