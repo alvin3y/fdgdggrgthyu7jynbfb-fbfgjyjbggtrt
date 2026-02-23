@@ -8,7 +8,6 @@ jobs:
     runs-on: macos-latest
     
     env:
-      # Ensure we link against Homebrew's FFmpeg
       PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig"
 
     steps:
@@ -16,7 +15,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install System Dependencies
-        # Installs FFmpeg with AVFoundation support
         run: |
           brew install ffmpeg pkg-config opus libvpx
           brew install cliclick
@@ -27,7 +25,6 @@ jobs:
           python-version: '3.10'
 
       - name: Install Python Libraries
-        # Compiling 'av' from source is required for full AVFoundation support on macOS runners
         run: |
           pip install --upgrade pip
           pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz
@@ -45,7 +42,8 @@ jobs:
           from aiortc.contrib.media import MediaPlayer
           from pynput.mouse import Button, Controller as MouseController
           from pynput.keyboard import Key, Controller as KeyboardController
-          import Quartz # For screen resolution
+          import Quartz
+          import av
 
           # --- CONFIGURATION ---
           WS_URL = "wss://alvin3y1-forward.hf.space/macos"
@@ -60,6 +58,42 @@ jobs:
 
           mouse = MouseController()
           keyboard = KeyboardController()
+
+          # --- CUSTOM TRACK FOR DYNAMIC RESIZING ---
+          class ResolutionTransformTrack(VideoStreamTrack):
+              """
+              Wraps the screen capture track and resizes frames in software.
+              This allows changing resolution without restarting the sensitive AVFoundation capture.
+              """
+              def __init__(self, track):
+                  super().__init__()
+                  self.track = track
+                  self.target_width = 0
+                  self.target_height = 0
+
+              def set_resolution(self, width, height):
+                  self.target_width = int(width)
+                  self.target_height = int(height)
+                  print(f"TRANSFORMER: Output resolution set to {self.target_width}x{self.target_height}")
+
+              async def recv(self):
+                  frame = await self.track.recv()
+                  
+                  # If target resolution is set and different from current, resize
+                  if (self.target_width > 0 and self.target_height > 0 and 
+                      (frame.width != self.target_width or frame.height != self.target_height)):
+                      
+                      try:
+                          # 'reformat' is efficient and handles pixel format conversion if needed
+                          new_frame = frame.reformat(width=self.target_width, height=self.target_height)
+                          new_frame.pts = frame.pts
+                          new_frame.time_base = frame.time_base
+                          return new_frame
+                      except Exception as e:
+                          print(f"Frame resize error: {e}")
+                          return frame
+                  
+                  return frame
 
           # --- RESOLUTION DETECTION ---
           main_display_id = Quartz.CGMainDisplayID()
@@ -77,13 +111,10 @@ jobs:
               'Super_L': Key.cmd, 'cmd': Key.cmd,
               'Up': Key.up, 'Down': Key.down, 'Left': Key.left, 'Right': Key.right,
               'Home': Key.home, 'End': Key.end, 'Page_Up': Key.page_up, 'Page_Down': Key.page_down,
-              'Delete': Key.delete,
-              'F1': Key.f1, 'F2': Key.f2, 'F3': Key.f3, 'F4': Key.f4,
-              'F5': Key.f5, 'F6': Key.f6, 'F7': Key.f7, 'F8': Key.f8, 
-              'F9': Key.f9, 'F10': Key.f10, 'F11': Key.f11, 'F12': Key.f12
+              'Delete': Key.delete
           }
 
-          async def handle_input(channel):
+          async def handle_input(channel, transformer):
               @channel.on("message")
               def on_message(message):
                   try:
@@ -91,6 +122,7 @@ jobs:
                       t = data.get('type')
 
                       if t == 'mousemove':
+                          # Mouse mapping must always map to the NATIVE screen coordinates
                           x = int(data['x'] * screen_width)
                           y = int(data['y'] * screen_height)
                           mouse.position = (x, y)
@@ -123,12 +155,10 @@ jobs:
                           elif len(k) == 1: keyboard.release(k)
                       
                       elif t == 'resize':
-                          # Received resolution sync from client.
-                          # Since AVFoundation capture is initialized with fixed native resolution,
-                          # we log this request. In a full implementation, this could trigger
-                          # a stream restart or encoder reconfiguration.
                           w, h = data.get('width'), data.get('height')
-                          print(f"Client requested resize to: {w}x{h} (Keeping Native: {screen_width}x{screen_height})")
+                          # Update the transformer track with new dimensions
+                          if transformer:
+                              transformer.set_resolution(w, h)
 
                   except Exception as e:
                       print(f"Input Error: {e}")
@@ -154,26 +184,28 @@ jobs:
                           config = RTCConfiguration(iceServers=ICE_SERVERS)
                           pc = RTCPeerConnection(config)
                           
-                          # --- NATIVE STREAMING SETUP ---
-                          # Using avfoundation via FFmpeg
-                          # pixel_format "uyvy422" is standard for macOS screen capture
+                          # --- MEDIA SETUP ---
                           try:
+                              # Capture full screen natively
                               player = MediaPlayer("0", format="avfoundation", options={
                                   "framerate": "30",
                                   "video_size": f"{screen_width}x{screen_height}", 
                                   "pixel_format": "uyvy422",
-                                  "probesize": "32",
-                                  "analyzeduration": "0",
                                   "capture_cursor": "1",
                                   "capture_mouse_clicks": "1"
                               })
-                              pc.addTrack(player.video)
+                              
+                              # Wrap the raw track in our Resizer
+                              video_track = ResolutionTransformTrack(player.video)
+                              pc.addTrack(video_track)
+                              
                           except Exception as e:
                               print(f"Media Error: {e}")
                               return
 
                           dc = pc.createDataChannel("input")
-                          await handle_input(dc)
+                          # Pass the transformer to the input handler so it can receive resize events
+                          await handle_input(dc, video_track)
 
                           @pc.on("iceconnectionstatechange")
                           async def on_ice_state_change():
