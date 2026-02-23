@@ -190,17 +190,17 @@ jobs:
                                   "framerate": "30",
                                   "video_size": f"{w}x{h}",
                                   "pixel_format": "uyvy422",
-                                  "capture_cursor": "1",
+                                  "capture_cursor": "0",
                                   "capture_mouse_clicks": "1",
                                   "probesize": "100M",
                                   "analyzeduration": "100M"
                               })
                               
                               # Configure Transceiver with High Bitrate (3 Mbps)
-                              # We use sendEncodings here to avoid the 'getParameters' error
-                              transceiver = pc.addTransceiver(player.video, sendEncodings=[
-                                  RTCRtpEncodingParameters(maxBitrate=3000000)
-                              ])
+                              # FIX: Create Encoding object and set maxBitrate separately
+                              encoding = RTCRtpEncodingParameters()
+                              encoding.maxBitrate = 3000000
+                              transceiver = pc.addTransceiver(player.video, sendEncodings=[encoding])
                               
                               # Force H.264 Codec
                               capabilities = RTCRtpSender.getCapabilities("video")
