@@ -41,6 +41,7 @@ jobs:
           import subprocess
           import re
           from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCIceServer, RTCConfiguration, RTCRtpSender
+          from aiortc.rtcrtpparameters import RTCRtpEncodingParameters
           from aiortc.contrib.media import MediaPlayer
           from pynput.mouse import Button, Controller as MouseController
           from pynput.keyboard import Key, Controller as KeyboardController
@@ -180,13 +181,11 @@ jobs:
                           config = RTCConfiguration(iceServers=ICE_SERVERS)
                           pc = RTCPeerConnection(config)
                           
-                          # 1. Get exact screen size
                           w, h = get_screen_size()
-                          print(f"Starting stream at HIGH RES: {w}x{h}")
+                          print(f"Starting stream at: {w}x{h}")
 
                           try:
-                              # 2. Configure High Quality Capture
-                              # We specifically pass video_size to prevent ffmpeg defaulting to 480p
+                              # AVFoundation Capture
                               player = MediaPlayer("0", format="avfoundation", options={
                                   "framerate": "30",
                                   "video_size": f"{w}x{h}",
@@ -197,30 +196,20 @@ jobs:
                                   "analyzeduration": "100M"
                               })
                               
-                              # 3. Add Transceiver & Force H.264 / High Bitrate
-                              transceiver = pc.addTransceiver(player.video)
+                              # Configure Transceiver with High Bitrate (3 Mbps)
+                              # We use sendEncodings here to avoid the 'getParameters' error
+                              transceiver = pc.addTransceiver(player.video, sendEncodings=[
+                                  RTCRtpEncodingParameters(maxBitrate=3000000)
+                              ])
                               
-                              # Force H.264 Codec (Sharper than VP8)
+                              # Force H.264 Codec
                               capabilities = RTCRtpSender.getCapabilities("video")
                               prefs = [c for c in capabilities.codecs if c.mimeType == "video/H264"]
                               if prefs:
                                   transceiver.setCodecPreferences(prefs)
                                   print("Codec set to H.264")
                               else:
-                                  print("H.264 not available, falling back to default.")
-
-                              # 4. Force High Bitrate (3 Mbps)
-                              # This is done by modifying the sender parameters
-                              sender = transceiver.sender
-                              params = sender.getParameters()
-                              if not params.encodings:
-                                  # If encodings list is empty, create a default one
-                                  from aiortc.rtcrtpparameters import RTCRtpEncodingParameters
-                                  params.encodings = [RTCRtpEncodingParameters(maxBitrate=3000000)]
-                              else:
-                                  params.encodings[0].maxBitrate = 3000000
-                              
-                              await sender.setParameters(params)
+                                  print("H.264 unavailable, using default.")
 
                           except Exception as e:
                               print(f"Media Error: {e}")
