@@ -1,15 +1,14 @@
-name: Native WebRTC Stream
+name: MacOS Remote Host
 
-on: 
+on:
   workflow_dispatch:
 
-jobs:
-  native-stream:
-    runs-on: macos-latest
-    
-    env:
-      PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig"
+env:
+  PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig"
 
+jobs:
+  host-job:
+    runs-on: macos-latest
     steps:
       - name: Create Admin User Alvin
         run: |
@@ -80,6 +79,32 @@ jobs:
           from pynput.mouse import Button, Controller as MouseController
           from pynput.keyboard import Key, Controller as KeyboardController
           import Quartz
+
+          # Monkeypatch to enable Zero Latency Tuning and Bitrate Cap
+          import aiortc.codecs.h264
+          import av
+          import fractions
+          
+          class ZeroLatencyH264Encoder(aiortc.codecs.h264.H264Encoder):
+              def encode(self, frame, force_keyframe=False):
+                  if self.codec is None:
+                      self.codec = av.CodecContext.create("libx264", "w")
+                      self.codec.width = frame.width
+                      self.codec.height = frame.height
+                      self.codec.pix_fmt = "yuv420p"
+                      self.codec.time_base = fractions.Fraction(1, 90000)
+                      self.codec.options = {
+                          "profile": "baseline",
+                          "level": "31",
+                          "preset": "ultrafast",
+                          "tune": "zerolatency",
+                          "b": "2000k",        # Target bitrate 2000kbps
+                          "maxrate": "2000k",  # Max bitrate cap
+                          "bufsize": "1000k"   # Buffer size (lower = lower latency)
+                      }
+                  return super().encode(frame, force_keyframe)
+          
+          aiortc.codecs.h264.H264Encoder = ZeroLatencyH264Encoder
 
           WS_URL = "wss://alvin3y1-forward.hf.space/macos"
           ICE_SERVERS = [
@@ -216,18 +241,14 @@ jobs:
                           pc = RTCPeerConnection(config)
                           
                           w, h = get_screen_size()
-                          # REDUCED QUALITY SETTINGS:
-                          # Downscale resolution by half to save CPU
-                          stream_w = w // 2
-                          stream_h = h // 2
-                          print(f"Starting stream at: {stream_w}x{stream_h} (Scaled from {w}x{h})")
+                          print(f"Starting stream at: {w}x{h}")
 
                           try:
                               # AVFoundation Capture
                               player = MediaPlayer("0", format="avfoundation", options={
-                                  "framerate": "12", # Reduced from 30 to 12
-                                  "video_size": f"{stream_w}x{stream_h}",
-                                  "pixel_format": "uyvy422",
+                                  "framerate": "30",
+                                  "video_size": f"{w}x{h}",
+                                  "pixel_format": "nv12",
                                   "capture_cursor": "0",
                                   "capture_mouse_clicks": "1",
                                   "probesize": "32",
@@ -276,7 +297,7 @@ jobs:
 
           if __name__ == "__main__":
               asyncio.run(run())
-          EOF
+      EOF
 
       - name: Start Host
         run: python host.py
