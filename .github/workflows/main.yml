@@ -41,7 +41,6 @@ jobs:
           import subprocess
           import re
           from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCIceServer, RTCConfiguration, RTCRtpSender
-          from aiortc.rtcrtpparameters import RTCRtpEncodingParameters
           from aiortc.contrib.media import MediaPlayer
           from pynput.mouse import Button, Controller as MouseController
           from pynput.keyboard import Key, Controller as KeyboardController
@@ -196,11 +195,9 @@ jobs:
                                   "analyzeduration": "100M"
                               })
                               
-                              # Configure Transceiver with High Bitrate (3 Mbps)
-                              # FIX: Create Encoding object and set maxBitrate separately
-                              encoding = RTCRtpEncodingParameters()
-                              encoding.maxBitrate = 3000000
-                              transceiver = pc.addTransceiver(player.video, sendEncodings=[encoding])
+                              # Configure Transceiver
+                              # FIX: Removed manual encoding parameters which caused crash
+                              transceiver = pc.addTransceiver(player.video)
                               
                               # Force H.264 Codec
                               capabilities = RTCRtpSender.getCapabilities("video")
