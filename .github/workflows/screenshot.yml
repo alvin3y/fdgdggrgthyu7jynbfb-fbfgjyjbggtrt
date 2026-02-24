@@ -1,0 +1,51 @@
+name: Full Ubuntu Desktop Screenshot
+on: workflow_dispatch  # Allows manual triggering
+
+jobs:
+  capture-full-ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Maximize Disk Space
+        # The full desktop is huge; we should clear some pre-installed junk first
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+
+      - name: Install Full Ubuntu Desktop
+        run: |
+          sudo apt-get update
+          # DEBIAN_FRONTEND=noninteractive is MANDATORY here to skip keyboard/locale prompts
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            ubuntu-desktop \
+            xvfb \
+            imagemagick \
+            dbus-x11
+
+      - name: Launch GNOME and Capture
+        run: |
+          # 1. Setup Virtual Display
+          Xvfb :99 -screen 0 1920x1080x24 &
+          export DISPLAY=:99
+          
+          # 2. Launch D-Bus session (Required for full GNOME)
+          export $(dbus-launch)
+          
+          # 3. Start GNOME Shell (X11 mode)
+          # We use --replace to ensure it takes over the virtual screen
+          gnome-shell --x11 & 
+          
+          # 4. Wait for the full environment to load
+          # The full desktop takes longer than the minimal one to stabilize
+          echo "Waiting 60 seconds for the full desktop to load..."
+          sleep 60
+          
+          # 5. Capture the screenshot
+          import -window root full-ubuntu-desktop.png
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-desktop-capture
+          path: full-ubuntu-desktop.png
+          
