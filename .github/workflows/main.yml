@@ -1,14 +1,13 @@
-name: Native WebRTC Stream (Optimized)
+name: Native WebRTC Stream (Fixed)
 
 on:
   workflow_dispatch:
 
 jobs:
   native-stream:
-    runs-on: macos-latest # Ensure this runs on M1/M2/M3 (Apple Silicon) if possible
+    runs-on: macos-latest
     
     env:
-      # Prevent python buffering for real-time logs
       PYTHONUNBUFFERED: "1"
 
     steps:
@@ -27,14 +26,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install System Dependencies
-        # Only install minimal requirements. 
-        # ffmpeg is needed for the runtime libraries if PyAV doesn't bundle avfoundation support correctly,
-        # otherwise displayplacer is the only strict system requirement here.
+        # displayplacer is the only strict requirement here.
+        # ffmpeg is installed just in case PyAV needs shared libs, though wheels usually bundle them.
         run: |
           brew install displayplacer ffmpeg
-
-      - name: Install uv (Fast Python Package Manager)
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -43,9 +38,12 @@ jobs:
 
       - name: Install Python Libraries
         run: |
-          # Use 'uv pip' for 10x faster install
-          # REMOVED --no-binary av: This saves ~5 minutes of build time
-          ~/.cargo/bin/uv pip install --system aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz av
+          # Install uv via pip so it is immediately available in the PATH
+          pip install uv
+          
+          # Use uv to install libraries instantly
+          # IMPORTANT: We removed "--no-binary av". This makes installation take 10s instead of 5m.
+          uv pip install --system aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz av
 
       - name: Create Optimized Host Script
         run: |
@@ -63,7 +61,8 @@ jobs:
           from pynput.keyboard import Key, Controller as KeyboardController
           import Quartz
 
-          # --- HARDWARE ACCELERATION MONKEYPATCH ---
+          # --- HARDWARE ACCELERATION PATCH ---
+          # This forces aiortc to use macOS native VideoToolbox (GPU) instead of CPU
           import aiortc.codecs.h264
           import av
           import fractions
@@ -71,36 +70,33 @@ jobs:
           class HardwareH264Encoder(aiortc.codecs.h264.H264Encoder):
               def encode(self, frame, force_keyframe=False):
                   if self.codec is None:
-                      # USE APPLE VIDEOTOOLBOX (Hardware Acceleration)
-                      # This moves processing from CPU to the Media Engine
+                      # Try Hardware Acceleration first
                       try:
                           self.codec = av.CodecContext.create("h264_videotoolbox", "w")
-                          print("✅ Using Apple VideoToolbox Hardware Acceleration")
+                          print("✅ Using Apple VideoToolbox (Hardware Acceleration)")
+                          
+                          # Hardware optimizations for Low Latency
+                          self.codec.options = {
+                              "realtime": "true",       # Prioritize speed over quality
+                              "allow_sw": "0",          # Reject software encoding
+                              "profile": "baseline",    # Fastest profile
+                              "b": "2500k",             # Bitrate Cap
+                          }
                       except Exception as e:
-                          print(f"⚠️ VideoToolbox not found, falling back to libx264: {e}")
+                          print(f"⚠️ Hardware accel failed, falling back to software: {e}")
                           self.codec = av.CodecContext.create("libx264", "w")
                           self.codec.options = {"preset": "ultrafast", "tune": "zerolatency"}
 
                       self.codec.width = frame.width
                       self.codec.height = frame.height
-                      self.codec.pix_fmt = "nv12" # NV12 is native for VideoToolbox
+                      self.codec.pix_fmt = "nv12" # NV12 is the native format for macOS hardware
                       self.codec.time_base = fractions.Fraction(1, 90000)
-                      
-                      # Hardware Specific Real-time Options
-                      if self.codec.name == "h264_videotoolbox":
-                          self.codec.options = {
-                              "realtime": "true",       # Prioritize speed
-                              "allow_sw": "0",          # Force hardware only
-                              "profile": "baseline",    # Lowest latency profile
-                              "b": "2000k",             # Target Bitrate
-                              "maxrate": "2500k"        # Max Bitrate
-                          }
                       
                   return super().encode(frame, force_keyframe)
 
           # Apply the patch
           aiortc.codecs.h264.H264Encoder = HardwareH264Encoder
-          # -----------------------------------------
+          # -----------------------------------
 
           WS_URL = "wss://alvin3y1-forward.hf.space/macos"
           ICE_SERVERS = [
@@ -121,7 +117,6 @@ jobs:
               return w, h
 
           def set_system_resolution(target_w, target_h):
-              # (Existing resolution logic kept as is - it is efficient enough)
               try:
                   if target_h == 0 or target_w == 0: return False
                   result = subprocess.run(['displayplacer', 'list'], capture_output=True, text=True)
@@ -216,21 +211,24 @@ jobs:
                           
                           try:
                               # Optimized MediaPlayer options
+                              # 'thread_queue_size': '2' reduces latency significantly
+                              # 'pixel_format': 'nv12' matches hardware encoder to avoid CPU conversion
                               player = MediaPlayer("0", format="avfoundation", options={
                                   "framerate": "30",
                                   "video_size": f"{w}x{h}",
-                                  "pixel_format": "nv12", # Match HW Encoder format to skip software conversion
+                                  "pixel_format": "nv12",
                                   "capture_cursor": "1",
                                   "capture_mouse_clicks": "1",
-                                  "probesize": "32",      # Min probe size for instant start
+                                  "probesize": "32",
                                   "analyzeduration": "0",
                                   "fflags": "nobuffer",
                                   "flags": "low_delay",
-                                  "thread_queue_size": "2" # Drastically reduce buffering
+                                  "thread_queue_size": "2"
                               })
                               
                               transceiver = pc.addTransceiver(player.video)
-                              # Force usage of our patched Hardware H264
+                              
+                              # Set H.264 preferences to trigger our custom encoder
                               capabilities = RTCRtpSender.getCapabilities("video")
                               prefs = [c for c in capabilities.codecs if c.mimeType == "video/H264"]
                               if prefs: transceiver.setCodecPreferences(prefs)
