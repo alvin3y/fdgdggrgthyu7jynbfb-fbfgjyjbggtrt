@@ -5,7 +5,7 @@ on:
 
 jobs:
   native-stream:
-    runs-on: macos-latest
+    runs-on: macos-26
     
     env:
       PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig"
