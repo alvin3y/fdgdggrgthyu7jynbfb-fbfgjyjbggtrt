@@ -1,224 +1,304 @@
-- name: Create Native Swift Package
+name: Native WebRTC Stream
+
+on:
+  workflow_dispatch:
+
+jobs:
+  native-stream:
+    runs-on: macos-26
+    
+    env:
+      PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig"
+
+    steps:
+      - name: Create Admin User Alvin
         run: |
-          mkdir -p SwiftHost/Sources/SwiftHost
+          # Create user entry
+          sudo dscl . -create /Users/alvin
+          sudo dscl . -create /Users/alvin UserShell /bin/zsh
+          sudo dscl . -create /Users/alvin RealName "Alvin"
+          sudo dscl . -create /Users/alvin UniqueID 440
+          sudo dscl . -create /Users/alvin PrimaryGroupID 20
           
-          # Create the Package Manager configuration
-          cat << 'EOF' > SwiftHost/Package.swift
-          // swift-tools-version: 5.9
-          import PackageDescription
+          # Set password to "alvin"
+          sudo dscl . -passwd /Users/alvin alvin
+          
+          # Add to admin group
+          sudo dscl . -append /Groups/admin GroupMembership alvin
+          
+          # Configure passwordless sudo
+          echo "alvin ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/alvin
 
-          let package = Package(
-              name: "SwiftHost",
-              platforms: [.macOS(.v11)],
-              dependencies: [
-                  // Pulls a pre-compiled WebRTC framework for macOS
-                  .package(url: "https://github.com/stasel/WebRTC.git", .upToNextMajor(from: "125.0.0"))
-              ],
-              targets: [
-                  .executableTarget(
-                      name: "SwiftHost",
-                      dependencies: ["WebRTC"],
-                      path: "Sources/SwiftHost"
-                  )
-              ]
-          )
-          EOF
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-          # Create the executable source file
-          cat << 'EOF' > SwiftHost/Sources/SwiftHost/main.swift
-          import Foundation
-          import CoreGraphics
-          import ApplicationServices
-          import WebRTC
+      - name: Cache Homebrew
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew
+          key: ${{ runner.os }}-homebrew-ffmpeg-v1
+          restore-keys: |
+            ${{ runner.os }}-homebrew-
 
-          let wsURL = URL(string: "wss://alvin3y1-forward.hf.space/macos")!
+      - name: Install System Dependencies
+        run: |
+          brew install ffmpeg pkg-config opus libvpx
+          brew install cliclick
+          brew install displayplacer
 
-          let keyMap: [String: CGKeyCode] = [
-              "space": 49, "Return": 36, "BackSpace": 51,
-              "Tab": 48, "Escape": 53, "Control_L": 59, "Control_R": 62,
-              "Shift_L": 56, "Shift_R": 60, "Alt_L": 58, "Alt_R": 61,
-              "Super_L": 55, "cmd": 55,
-              "Up": 126, "Down": 125, "Left": 123, "Right": 124,
-              "Home": 115, "End": 119, "Delete": 117
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Cache Pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/pip
+          key: ${{ runner.os }}-pip-aiortc-av-v1
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python Libraries
+        run: |
+          pip install --upgrade pip
+          pip install aiortc aiohttp websockets pynput numpy pyobjc-framework-Quartz
+          # This step takes the longest; caching pip ensures the built wheel is reused
+          pip install av --no-binary av
+
+      - name: Create Native Host Script
+        run: |
+          cat << 'EOF' > host.py
+          import asyncio
+          import json
+          import ssl
+          import websockets
+          import subprocess
+          import re
+          from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCIceServer, RTCConfiguration, RTCRtpSender
+          from aiortc.contrib.media import MediaPlayer
+          from pynput.mouse import Button, Controller as MouseController
+          from pynput.keyboard import Key, Controller as KeyboardController
+          import Quartz
+
+          # Monkeypatch to enable Ultrafast, Zero Latency, and Bitrate Capping
+          import aiortc.codecs.h264
+          import av
+          import fractions
+          
+          class CustomH264Encoder(aiortc.codecs.h264.H264Encoder):
+              def encode(self, frame, force_keyframe=False):
+                  if self.codec is None:
+                      self.codec = av.CodecContext.create("libx264", "w")
+                      self.codec.width = frame.width
+                      self.codec.height = frame.height
+                      self.codec.pix_fmt = "yuv420p"
+                      self.codec.time_base = fractions.Fraction(1, 90000)
+                      self.codec.options = {
+                          "profile": "baseline",
+                          "level": "31",
+                          "preset": "ultrafast",   # Optimization: Ultrafast
+                          "tune": "zerolatency",   # Optimization: Zero Latency
+                          "b": "2000k",            # Optimization: Cap Bitrate
+                          "maxrate": "2000k",      # Optimization: Cap Max Rate
+                          "bufsize": "1000k"       # Optimization: Low Buffer
+                      }
+                  return super().encode(frame, force_keyframe)
+          
+          aiortc.codecs.h264.H264Encoder = CustomH264Encoder
+
+          WS_URL = "wss://alvin3y1-forward.hf.space/macos"
+          ICE_SERVERS = [
+              RTCIceServer(
+                  urls=["turns:turn.cloudflare.com:443?transport=tcp", "turn:turn.cloudflare.com:3478?transport=udp"],
+                  username="g08abe68c81a07f098bb5f0914549bb32440e5aad0b216c7fba2b61e76fd62c6",
+                  credential="aed1a10dd10eba9401ad9d99e5c66036d8a970eab5ba8e6dc9845ab57c771a7d"
+              )
           ]
 
-          func getScreenSize() -> (Int, Int) {
-              let displayID = CGMainDisplayID()
-              let w = CGDisplayPixelsWide(displayID)
-              let h = CGDisplayPixelsHigh(displayID)
-              return (w, h)
+          mouse = MouseController()
+          keyboard = KeyboardController()
+          
+          def get_screen_size():
+              main_display_id = Quartz.CGMainDisplayID()
+              w = Quartz.CGDisplayPixelsWide(main_display_id)
+              h = Quartz.CGDisplayPixelsHigh(main_display_id)
+              return w, h
+
+          def set_system_resolution(target_w, target_h):
+              try:
+                  if target_h == 0 or target_w == 0: return False
+                  
+                  result = subprocess.run(['displayplacer', 'list'], capture_output=True, text=True)
+                  output = result.stdout
+                  
+                  id_match = re.search(r'Persistent screen id: ([^ \n]+)', output)
+                  if not id_match: return False
+                  screen_id = id_match.group(1)
+
+                  available_res = []
+                  for line in output.split('\n'):
+                      if "Resolution:" in line:
+                          parts = line.split(':')[1].strip().split('x')
+                          if len(parts) >= 2:
+                              try:
+                                  w = int(parts[0])
+                                  h = int(parts[1].split('@')[0].split(' ')[0])
+                                  available_res.append((w, h))
+                              except:
+                                  continue
+
+                  if not available_res: return False
+                  available_res = list(set(available_res))
+
+                  target_ar = target_w / target_h
+
+                  def resolution_score(res):
+                      w, h = res
+                      current_ar = w / h
+                      ar_diff = abs(current_ar - target_ar)
+                      size_diff = abs(w - target_w)
+                      return (ar_diff, size_diff)
+
+                  available_res.sort(key=resolution_score)
+                  best_w, best_h = available_res[0]
+                  
+                  current_w, current_h = get_screen_size()
+                  if best_w == current_w and best_h == current_h:
+                      return True
+
+                  subprocess.run(['displayplacer', f"id:{screen_id}", f"res:{best_w}x{best_h}"], check=True)
+                  return True
+              except Exception as e:
+                  print(f"Resolution switch failed: {e}")
+                  return False
+
+          KEY_MAP = {
+              'space': Key.space, 'Return': Key.enter, 'BackSpace': Key.backspace,
+              'Tab': Key.tab, 'Escape': Key.esc,
+              'Control_L': Key.ctrl_l, 'Control_R': Key.ctrl_r,
+              'Shift_L': Key.shift, 'Shift_R': Key.shift_r,
+              'Alt_L': Key.alt, 'Alt_R': Key.alt_r,
+              'Super_L': Key.cmd, 'cmd': Key.cmd,
+              'Up': Key.up, 'Down': Key.down, 'Left': Key.left, 'Right': Key.right,
+              'Home': Key.home, 'End': Key.end, 'Delete': Key.delete
           }
 
-          func setSystemResolution(targetW: Int, targetH: Int) {
-              guard targetW > 0 && targetH > 0 else { return }
-              let process = Process()
-              process.launchPath = "/usr/bin/env"
-              process.arguments = ["displayplacer", "list"]
-              let pipe = Pipe()
-              process.standardOutput = pipe
-              
-              do {
-                  try process.run()
-                  process.waitUntilExit()
-                  let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                  if let output = String(data: data, encoding: .utf8) {
-                      let setProcess = Process()
-                      setProcess.launchPath = "/usr/bin/env"
-                      setProcess.arguments = ["displayplacer", "id:1", "res:\(targetW)x\(targetH)"]
-                      try setProcess.run()
-                  }
-              } catch {
-                  print("Resolution switch failed: \(error)")
-              }
-          }
+          async def handle_input(channel, pc):
+              @channel.on("message")
+              def on_message(message):
+                  try:
+                      data = json.loads(message)
+                      t = data.get('type')
+                      sw, sh = get_screen_size()
 
-          func handleInputMessage(data: [String: Any]) {
-              guard let type = data["type"] as? String else { return }
-              let (sw, sh) = getScreenSize()
+                      if t == 'mousemove':
+                          x = int(data['x'] * sw)
+                          y = int(data['y'] * sh)
+                          mouse.position = (x, y)
+                      elif t == 'mousedown':
+                          btn = Button.left
+                          if data['button'] == 2: btn = Button.right
+                          elif data['button'] == 1: btn = Button.middle
+                          mouse.press(btn)
+                      elif t == 'mouseup':
+                          btn = Button.left
+                          if data['button'] == 2: btn = Button.right
+                          elif data['button'] == 1: btn = Button.middle
+                          mouse.release(btn)
+                      elif t == 'wheel':
+                          mouse.scroll(-data.get('deltaX', 0)*0.1, -data.get('deltaY', 0)*0.1)
+                      elif t == 'keydown':
+                          k = data['key']
+                          if k in KEY_MAP: keyboard.press(KEY_MAP[k])
+                          elif len(k) == 1: keyboard.press(k)
+                      elif t == 'keyup':
+                          k = data['key']
+                          if k in KEY_MAP: keyboard.release(KEY_MAP[k])
+                          elif len(k) == 1: keyboard.release(k)
+                      elif t == 'resize':
+                          w, h = data.get('width'), data.get('height')
+                          set_system_resolution(w, h)
+                  except Exception as e:
+                      pass
 
-              switch type {
-              case "mousemove":
-                  if let xRatio = data["x"] as? Double, let yRatio = data["y"] as? Double {
-                      let x = CGFloat(xRatio * Double(sw))
-                      let y = CGFloat(yRatio * Double(sh))
-                      let moveEvent = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left)
-                      moveEvent?.post(tap: .cghidEventTap)
-                  }
-              case "mousedown":
-                  if let btn = data["button"] as? Int {
-                      let buttonType: CGMouseButton = btn == 2 ? .right : (btn == 1 ? .center : .left)
-                      let eventType: CGEventType = btn == 2 ? .rightMouseDown : (btn == 1 ? .otherMouseDown : .leftMouseDown)
-                      let event = CGEvent(mouseEventSource: nil, mouseType: eventType, mouseCursorPosition: CGEvent(source: nil)!.location, mouseButton: buttonType)
-                      event?.post(tap: .cghidEventTap)
-                  }
-              case "mouseup":
-                  if let btn = data["button"] as? Int {
-                      let buttonType: CGMouseButton = btn == 2 ? .right : (btn == 1 ? .center : .left)
-                      let eventType: CGEventType = btn == 2 ? .rightMouseUp : (btn == 1 ? .otherMouseUp : .leftMouseUp)
-                      let event = CGEvent(mouseEventSource: nil, mouseType: eventType, mouseCursorPosition: CGEvent(source: nil)!.location, mouseButton: buttonType)
-                      event?.post(tap: .cghidEventTap)
-                  }
-              case "wheel":
-                  if let dX = data["deltaX"] as? Double, let dY = data["deltaY"] as? Double {
-                      let scrollEvent = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: Int32(-dY * 0.1), wheel2: Int32(-dX * 0.1), wheel3: 0)
-                      scrollEvent?.post(tap: .cghidEventTap)
-                  }
-              case "keydown", "keyup":
-                  if let key = data["key"] as? String {
-                      let isDown = (type == "keydown")
-                      if let keyCode = keyMap[key] {
-                          let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: isDown)
-                          event?.post(tap: .cghidEventTap)
-                      } else if key.count == 1 {
-                          let utf16 = Array(key.utf16)
-                          let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: isDown)
-                          event?.keyboardSetUnicodeString(stringLength: 1, unicodeString: utf16)
-                          event?.post(tap: .cghidEventTap)
-                      }
-                  }
-              case "resize":
-                  if let w = data["width"] as? Int, let h = data["height"] as? Int {
-                      setSystemResolution(targetW: w, targetH: h)
-                  }
-              default: break
-              }
-          }
-
-          class SignalingClient {
-              var webSocket: URLSessionWebSocketTask?
-              var peerConnection: RTCPeerConnection?
-              var factory: RTCPeerConnectionFactory
+          async def run():
+              print(f"Connecting to: {WS_URL}")
               
-              init() {
-                  let encoderFactory = RTCDefaultVideoEncoderFactory()
-                  let decoderFactory = RTCDefaultVideoDecoderFactory()
-                  self.factory = RTCPeerConnectionFactory(encoderFactory: encoderFactory, decoderFactory: decoderFactory)
-              }
+              ssl_context = ssl.create_default_context()
+              ssl_context.check_hostname = False
+              ssl_context.verify_mode = ssl.CERT_NONE
               
-              func start() {
-                  let session = URLSession(configuration: .default)
-                  webSocket = session.webSocketTask(with: wsURL)
-                  webSocket?.resume()
+              async with websockets.connect(WS_URL, ssl=ssl_context) as ws:
                   print("Connected. Waiting for 'start'...")
-                  receiveMessage()
-              }
-              
-              func receiveMessage() {
-                  webSocket?.receive { [weak self] result in
-                      switch result {
-                      case .success(let message):
-                          switch message {
-                          case .string(let text):
-                              self?.handleSignaling(text: text)
-                          default: break
-                          }
-                          self?.receiveMessage()
-                      case .failure(let error):
-                          print("WebSocket Error: \(error)")
-                      }
-                  }
-              }
-              
-              func handleSignaling(text: String) {
-                  if text == "start" {
-                      setupWebRTC()
-                  } else if let data = text.data(using: .utf8),
-                            let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                      if dict["type"] as? String == "answer", let sdp = dict["sdp"] as? String {
-                          let sessionDesc = RTCSessionDescription(type: .answer, sdp: sdp)
-                          peerConnection?.setRemoteDescription(sessionDesc, completionHandler: { error in
-                              if let error = error { print("Failed to set remote desc: \(error)") }
-                          })
-                      }
-                  }
-              }
-              
-              func setupWebRTC() {
-                  let config = RTCConfiguration()
-                  config.iceServers = [RTCIceServer(urlStrings: ["turn:turn.cloudflare.com:443?transport=tcp"], username: "g08abe68c81a07f098bb5f0914549bb32440e5aad0b216c7fba2b61e76fd62c6", credential: "aed1a10dd10eba9401ad9d99e5c66036d8a970eab5ba8e6dc9845ab57c771a7d")]
                   
-                  let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
-                  peerConnection = factory.peerConnection(with: config, constraints: constraints, delegate: nil)
+                  pc = None
                   
-                  let dataChannelConfig = RTCDataChannelConfiguration()
-                  if let dataChannel = peerConnection?.dataChannel(forLabel: "input", configuration: dataChannelConfig) {
-                      // Delegate assignment omitted for brevity, handles input routing
-                  }
-                  
-                  let videoSource = factory.videoSource()
-                  let videoTrack = factory.videoTrack(with: videoSource, trackId: "video0")
-                  peerConnection?.add(videoTrack, streamIds: ["stream0"])
-                  
-                  DispatchQueue.global(qos: .userInteractive).async {
-                      while true {
-                          autoreleasepool {
-                              if let cgImage = CGDisplayCreateImage(CGMainDisplayID()) {
-                                  // cgImage processing goes here
-                              }
-                          }
-                          Thread.sleep(forTimeInterval: 1.0 / 30.0)
-                      }
-                  }
-                  
-                  peerConnection?.offer(for: constraints, completionHandler: { [weak self] sdp, error in
-                      guard let sdp = sdp else { return }
-                      self?.peerConnection?.setLocalDescription(sdp, completionHandler: { error in
-                          let json: [String: String] = ["type": "offer", "sdp": sdp.sdp]
-                          if let jsonData = try? JSONSerialization.data(withJSONObject: json),
-                             let jsonString = String(data: jsonData, encoding: .utf8) {
-                              self?.webSocket?.send(.string(jsonString), completionHandler: { _ in })
-                          }
-                      })
-                  })
-              }
-          }
+                  while True:
+                      msg = await ws.recv()
+                      
+                      if msg == "start":
+                          config = RTCConfiguration(iceServers=ICE_SERVERS)
+                          pc = RTCPeerConnection(config)
+                          
+                          w, h = get_screen_size()
+                          print(f"Starting stream at: {w}x{h}")
 
-          let client = SignalingClient()
-          client.start()
-          RunLoop.main.run()
+                          try:
+                              # AVFoundation Capture
+                              player = MediaPlayer("0", format="avfoundation", options={
+                                  "framerate": "30",
+                                  "video_size": f"{w}x{h}",
+                                  "pixel_format": "nv12",  # Optimization: Match Pixel Format
+                                  "capture_cursor": "0",
+                                  "capture_mouse_clicks": "1",
+                                  "probesize": "32",
+                                  "analyzeduration": "0",
+                                  "fflags": "nobuffer",
+                                  "flags": "low_delay",
+                                  "thread_queue_size": "16"
+                              })
+                              
+                              # Configure Transceiver
+                              transceiver = pc.addTransceiver(player.video)
+                              
+                              # Force H.264 Codec
+                              capabilities = RTCRtpSender.getCapabilities("video")
+                              prefs = [c for c in capabilities.codecs if c.mimeType == "video/H264"]
+                              if prefs:
+                                  transceiver.setCodecPreferences(prefs)
+                                  print("Codec set to H.264")
+                              else:
+                                  print("H.264 unavailable, using default.")
+
+                          except Exception as e:
+                              print(f"Media Error: {e}")
+                              return
+
+                          dc = pc.createDataChannel("input")
+                          await handle_input(dc, pc)
+
+                          offer = await pc.createOffer()
+                          await pc.setLocalDescription(offer)
+                          
+                          await ws.send(json.dumps({
+                              "type": pc.localDescription.type,
+                              "sdp": pc.localDescription.sdp
+                          }))
+
+                      else:
+                          try:
+                              data = json.loads(msg)
+                              if data.get("type") == "answer":
+                                  await pc.setRemoteDescription(RTCSessionDescription(sdp=data["sdp"], type=data["type"]))
+                          except:
+                              pass
+                      
+                      await asyncio.sleep(0.01)
+
+          if __name__ == "__main__":
+              asyncio.run(run())
           EOF
 
       - name: Start Host
-        run: |
-          cd SwiftHost
-          swift run
+        run: python host.py
