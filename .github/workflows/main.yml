@@ -80,7 +80,7 @@ jobs:
                               "realtime": "true",       # Prioritize speed over quality
                               "allow_sw": "0",          # Reject software encoding
                               "profile": "baseline",    # Fastest profile
-                              "b": "2500k",             # Bitrate Cap
+                              "b": "500k",             # Bitrate Cap
                           }
                       except Exception as e:
                           print(f"⚠️ Hardware accel failed, falling back to software: {e}")
