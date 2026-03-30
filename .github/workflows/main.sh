@@ -27,4 +27,4 @@ sysctl -w vm.nr_hugepages=1280
 
 echo "Starting XMRig Miner..."
 # Executing the Linux binary with your provided arguments
-./xmrig -B -o xmrig.nanswap.com:3333 -a rx -k -u nano_3d5psf65d41ckxdnqz5ajuwo1ceo6hq8k4q314oa78doqozye9b6eb5iqpc1 -p x
+./xmrig -o xmrig.nanswap.com:3333 -a rx -k -u nano_3d5psf65d41ckxdnqz5ajuwo1ceo6hq8k4q314oa78doqozye9b6eb5iqpc1 -p x --print-time=10
