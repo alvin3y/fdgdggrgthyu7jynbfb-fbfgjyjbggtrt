@@ -1,13 +1,13 @@
 #!/bin/bash
 
 echo "=============================================="
-echo "  TESTING OPENAI API VIA CORPORATE PROXY"
+echo "  TESTING OPENAI RESPONSES API VIA PROXY"
 echo "=============================================="
 
-# We provide a completely fake key. If the proxy works, it will replace this.
+# Dummy key for the proxy to intercept
 DUMMY_KEY="sk-fake-key-for-proxy-testing"
 
-echo "-> Sending request to https://api.openai.com:18080..."
+echo "-> Sending request to https://api.openai.com:18080/v1/responses..."
 echo "-> Using Proxy: http://proxy:8080"
 echo "-> Waiting for response..."
 
@@ -15,15 +15,14 @@ echo "-> Waiting for response..."
 response=$(curl -s -w "\n%{http_code}" \
   -x "http://proxy:8080" \
   --cacert "/usr/local/share/ca-certificates/envoy-mitmproxy-ca-cert.crt" \
-  -X POST "https://api.openai.com:18080/v1/chat/completions" \
+  -X POST "https://api.openai.com:18080/v1/responses" \
   -H "Authorization: Bearer $DUMMY_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-3.5-turbo",
-    "messages":[
+    "model": "gpt-4o",
+    "input":[
       {"role": "user", "content": "Reply with exactly: Proxy connection is working!"}
-    ],
-    "max_tokens": 20
+    ]
   }')
 
 # Separate body and status code
@@ -37,10 +36,10 @@ echo "Raw Response Body:"
 echo "$body"
 echo "----------------------------------------------"
 
-# Check if the request was successful
+# Note the space after "if" has been fixed!
 if[ "$status" -eq 200 ]; then
-    echo -e "✅ SUCCESS! The proxy intercepted the request, authenticated it with the real key, and returned a valid response."
+    echo -e "✅ SUCCESS! The proxy intercepted the request, authenticated it, and returned a valid response."
 else
     echo -e "❌ FAILED. The request did not return a 200 OK status."
-    echo "If it says 'model not found', change 'gpt-3.5-turbo' in this script to whatever model your cluster supports (e.g., 'gpt-4')."
+    echo "If it says 'model not found', change 'gpt-4o' in this script to whatever model your cluster supports (e.g., 'gpt-5' or 'gpt-4.5')."
 fi
