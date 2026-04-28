@@ -11,8 +11,8 @@ ENV_FILE="$EXPORT_DIR/connection_details.env"
 # 1. Create export directory
 mkdir -p "$EXPORT_DIR"
 
-# 2. Copy the crucial custom SSL certificate
-if[ -f "$CERT_PATH" ]; then
+# 2. Copy the crucial custom SSL certificate (Fixed space in 'if [')
+if [ -f "$CERT_PATH" ]; then
     cp "$CERT_PATH" "$EXPORT_DIR/company_proxy_cert.crt"
     echo "✅ Extracted custom SSL Certificate."
 else
