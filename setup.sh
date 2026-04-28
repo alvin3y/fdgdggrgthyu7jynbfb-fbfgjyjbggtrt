@@ -1,10 +1,29 @@
 #!/bin/bash
 
-echo "--- Searching for OpenAI API Key in configuration files ---"
+# List of potential configuration files based on your directory tree
+FILES_TO_CHECK=(
+    "/workspace/coinlynk-private/.env"
+    "/workspace/coinlynk-private/.env.production"
+    "/workspace/coinlynk-private/auth_config.json"
+    "/opt/codex/config.toml"
+)
 
-# Check the main workspace .env files
-echo ">> Checking .env files in /workspace/coinlynk-private:"
-grep -i -E "openai|api_key|token" /workspace/coinlynk-private/.env /workspace/coinlynk-private/.env.production /workspace/coinlynk-private/.env.example 2>/dev/null
+echo "=========================================================="
+echo "          EXTRACTING ALL CONFIGURATION DATA               "
+echo "=========================================================="
 
-echo -e "\n>> Checking Codex system config:"
-grep -i -E "openai|api_key|token|bearer" /opt/codex/config.toml 2>/dev/null
+for FILE in "${FILES_TO_CHECK[@]}"; do
+    echo ""
+    echo "----------------------------------------------------------"
+    echo "▶ DUMPING FILE: $FILE"
+    echo "----------------------------------------------------------"
+    
+    if [ -f "$FILE" ]; then
+        # Print the entire file content
+        cat "$FILE"
+    else
+        echo "[!] File not found or inaccessible."
+    fi
+done
+echo ""
+echo "======================== END ========================"
